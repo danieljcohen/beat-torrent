@@ -59,9 +59,14 @@ Make sure there is data then ur good
 
 How to test
 Terminal 1
-python host_peer.py --port 9003 --total-chunks 10 --chunk-size 1024
+python peer.py \
+  --listen-port 9003 --seed --num-chunks 120 --chunk-size 4096
 
 Terminal 2
-python viewer_peer.py --host 172.16.21.114 --port 9003 --inflight 3 --prebuffer 2
+python peer.py \
+  --listen-port 9004 --num-chunks 120 --chunk-size 4096 \
+  --connect [IP_ADDRESS]:9003 (use ur own IP)
+
+
 
 
