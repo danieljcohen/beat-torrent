@@ -52,3 +52,16 @@ Ctrl C
 ls -lh /tmp/recv_from_viewer.bin
 
 Make sure there is data then ur good
+
+## Step 5: Direct peer to peer data path (long so substeps)
+
+### Step 5.1: minimal raw TCP peer-to-peer connection between a host and a viewer, allowing them to exchange chunked data directly without using the server
+
+How to test
+Terminal 1
+python host_peer.py --port 9003 --total-chunks 10 --chunk-size 1024
+
+Terminal 2
+python viewer_peer.py --host 172.16.21.114 --port 9003 --inflight 3 --prebuffer 2
+
+
