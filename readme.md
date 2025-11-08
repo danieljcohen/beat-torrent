@@ -35,3 +35,20 @@ open -n -a "Google Chrome" ./frontend.html
 This is peer discovery through the server, will later replace with connection details to establish connections between peers. This is the setup for peer to peer connections, so although it looks like we sending data through server, this will just be connection details.
 
 Test same way as previous step - I added a button to send a json blob.
+
+## Step 4: No code, just ensuring P2P connection works on network (make sure to test on Duke's campus / on their wifi)
+
+Get IP address:
+ipconfig getifaddr en0
+
+Terminal 1 - Start listening for incoming bytes on port 9001
+nc -lk 9001 > /tmp/recv_from_viewer.bin
+
+Terminal 2 (separate) - Send 1 MB of random data directly to the host’s IP and port 9001
+dd if=/dev/urandom bs=1m count=1 | nc 172.16.21.114 9001
+
+Back to Terminal 1 - check the result:
+Ctrl C
+ls -lh /tmp/recv_from_viewer.bin
+
+Make sure there is data then ur good
