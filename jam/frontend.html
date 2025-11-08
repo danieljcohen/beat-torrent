@@ -61,6 +61,23 @@
           <button id="pauseBtn" class="secondary" disabled>PAUSE</button>
         </div>
       </div>
+      <div class="row" style="margin-top:10px">
+        <div>
+          <label>My Peer ID</label><br />
+          <input id="myPeerId" type="text" value="(none)" size="18" readonly />
+        </div>
+        <div>
+          <label>To Peer ID</label><br />
+          <input id="toPeerId" type="text" placeholder="peer id" size="18" />
+        </div>
+        <div style="flex:1; min-width:260px;">
+          <label>Blob JSON</label><br />
+          <input id="signalBlob" type="text" placeholder='{"hello":"world"}' style="width:100%;" />
+        </div>
+        <div style="display:flex; align-items:flex-end;">
+          <button id="signalBtn" class="secondary" disabled>Send SIGNAL</button>
+        </div>
+      </div>
       <div style="margin-top:10px">
         <span id="statusPill" class="pill bad">disconnected</span>
         <span class="muted" id="stateLine"></span>
@@ -82,6 +99,10 @@
     const disconnectBtn = $('disconnectBtn');
     const playBtn = $('playBtn');
     const pauseBtn = $('pauseBtn');
+    const myPeerIdInput = $('myPeerId');
+    const toPeerIdInput = $('toPeerId');
+    const signalBlobInput = $('signalBlob');
+    const signalBtn = $('signalBtn');
 
     let ws = null;
     function now() { return new Date().toLocaleTimeString(); }
@@ -97,12 +118,13 @@
         statusPill.textContent = 'connected';
         statusPill.classList.add('ok'); statusPill.classList.remove('bad');
         connectBtn.disabled = true; disconnectBtn.disabled = false;
-        playBtn.disabled = false; pauseBtn.disabled = false;
+        playBtn.disabled = false; pauseBtn.disabled = false; signalBtn.disabled = false;
       } else {
         statusPill.textContent = 'disconnected';
         statusPill.classList.add('bad'); statusPill.classList.remove('ok');
         connectBtn.disabled = false; disconnectBtn.disabled = true;
-        playBtn.disabled = true; pauseBtn.disabled = true;
+        playBtn.disabled = true; pauseBtn.disabled = true; signalBtn.disabled = true;
+        myPeerIdInput.value = '(none)';
       }
     }
 
@@ -127,6 +149,14 @@
           if (msg.type === 'STATE') {
             const p = msg.payload || {};
             stateLine.textContent = `STATE: track=${p.track_id ?? '(none)'} status=${p.status} offset=${p.offset_sec} ts=${p.timestamp}`;
+          } else if (msg.type === 'PEER') {
+            if (msg.peer_id) {
+              myPeerIdInput.value = msg.peer_id;
+            }
+          } else if (msg.type === 'SIGNAL') {
+            // Show who sent it and the blob contents
+            const from = msg.from || '(unknown)';
+            appendLog('←', `SIGNAL from ${from}: ${JSON.stringify(msg.blob)}`);
           }
         } catch (_) {}
       };
@@ -159,6 +189,28 @@
 
     playBtn.onclick = () => sendControl('PLAY');
     pauseBtn.onclick = () => sendControl('PAUSE');
+
+    signalBtn.onclick = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendLog('!', 'Not connected');
+        return;
+      }
+      const to = toPeerIdInput.value.trim();
+      if (!to) {
+        appendLog('!', 'Enter target peer id');
+        return;
+      }
+      let blob;
+      try {
+        blob = JSON.parse(signalBlobInput.value || '{}');
+      } catch (e) {
+        appendLog('!', `Invalid JSON: ${e}`);
+        return;
+      }
+      const msg = { type: 'SIGNAL', to, blob };
+      ws.send(JSON.stringify(msg));
+      appendLog('→', msg);
+    };
   </script>
 </body>
 </html>

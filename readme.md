@@ -25,7 +25,13 @@ websocat -t ws://localhost:8000/ws/jam1
 
 ## Step 2: Starting host then viewer is super annoying for testing start 1. Simple web UI to test host message --> server --> all participants
 Start server:
-websocat -t ws://localhost:8000/ws/jam1
+websocat -t ws://localhost:8000/ws/jam
 
 Start frontend:
 open -n -a "Google Chrome" ./frontend.html
+
+## Step 3: Sending blob between peers through server / storing peer list in server
+
+This is peer discovery through the server, will later replace with connection details to establish connections between peers. This is the setup for peer to peer connections, so although it looks like we sending data through server, this will just be connection details.
+
+Test same way as previous step - I added a button to send a json blob.

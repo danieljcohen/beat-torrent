@@ -11,6 +11,8 @@ app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
 
 participants: Set[WebSocket] = set()
 host_id: Optional[int] = None
+peer_id_by_ws: dict[WebSocket, str] = {}
+ws_by_peer_id: dict[str, WebSocket] = {} #support for multiple rooms (tho not yet implemented)
 
 # shared state
 state = {
@@ -33,6 +35,10 @@ async def broadcast(message_json: str):
             disconnected.append(ws)
     for ws in disconnected:
         participants.discard(ws)
+
+def generate_peer_id() -> str:
+    # Simple short (unique) peer id
+    return f"p{int(time.time() * 1000) % 1000000:x}"
 
 
 @app.websocket("/ws/jam1")
@@ -73,6 +79,12 @@ async def ws_jam1(websocket: WebSocket):
     # Add participant
     participants.add(websocket)
 
+    # Assign peer id and send to this socket
+    my_peer_id = generate_peer_id()
+    peer_id_by_ws[websocket] = my_peer_id
+    ws_by_peer_id[my_peer_id] = websocket
+    await websocket.send_text(json.dumps({"type": "PEER", "peer_id": my_peer_id}))
+
     # Send initial STATE immediately
     await websocket.send_text(json.dumps({"type": "STATE", "payload": state}))
 
@@ -102,6 +114,19 @@ async def ws_jam1(websocket: WebSocket):
                 # Broadcast STATE to all (including sender)
                 out = json.dumps({"type": "STATE", "payload": state})
                 await broadcast(out)
+            elif msg_type == "SIGNAL":
+                # Letting peers send blob to eachoter --> later replace with connection offer between peers (bittorrent style peer discovery)
+                to_peer = msg["to"]
+                blob = msg["blob"]
+                dst_ws = ws_by_peer_id.get(to_peer)
+                if dst_ws:
+                    from_peer = peer_id_by_ws.get(websocket, "unknown")
+                    routed = json.dumps({"type": "SIGNAL", "from": from_peer, "blob": blob})
+                    try:
+                        await dst_ws.send_text(routed)
+                        print(f"SIGNAL route {from_peer} -> {to_peer}")
+                    except Exception:
+                        pass
             else:
                 await websocket.send_text(json.dumps({"type": "ERROR", "message": f"Unknown type: {msg_type}"}))
                 
@@ -110,6 +135,9 @@ async def ws_jam1(websocket: WebSocket):
     finally:
         # Cleanup on disconnect
         participants.discard(websocket)
+        pid = peer_id_by_ws.pop(websocket, None)
+        if pid:
+            ws_by_peer_id.pop(pid, None)
         if is_host and host_id == id(websocket):
             # Clear host if it was this socket
             host_id = None
