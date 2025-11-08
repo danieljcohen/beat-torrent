@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jam Debug</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b1020; color:#e6e9f5; margin:0; }
+    .wrap { max-width: 920px; margin: 32px auto; padding: 0 16px; }
+    .card { background:#141b34; border:1px solid #243056; border-radius:12px; padding:16px; margin-bottom:16px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    label { font-size: 12px; color:#a9b4d0; }
+    input[type="text"], input[type="number"] {
+      background:#0f162b; color:#e6e9f5; border:1px solid #243056; border-radius:8px; padding:8px 10px; outline:none;
+    }
+    input[type="text"]:focus, input[type="number"]:focus { border-color:#5b78ff; }
+    button { background:#5b78ff; color:white; border:none; border-radius:8px; padding:10px 14px; cursor:pointer; }
+    button.secondary { background:#2b375f; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .log { background:#0f162b; border:1px solid #243056; border-radius:8px; padding:10px; height:260px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; }
+    .pill.ok { background:#11391d; color:#7bff9b; border:1px solid #1f6b3b; }
+    .pill.bad { background:#3a1111; color:#ff7b7b; border:1px solid #6b1f1f; }
+    .muted { color:#a9b4d0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Jam Debug</h1>
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Endpoint</label><br />
+          <input id="wsUrl" type="text" value="ws://localhost:8000/ws/jam1" size="40" />
+        </div>
+        <div>
+          <label>Role</label><br />
+          <label><input type="radio" name="role" value="host" checked /> host</label>
+          <label style="margin-left:8px;"><input type="radio" name="role" value="viewer" /> viewer</label>
+        </div>
+        <div>
+          <label>Display Name</label><br />
+          <input id="displayName" type="text" value="Debug" />
+        </div>
+        <div style="margin-left:auto">
+          <button id="connectBtn">Connect</button>
+          <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div>
+          <label>track_id</label><br />
+          <input id="trackId" type="text" value="t1" />
+        </div>
+        <div>
+          <label>offset_sec</label><br />
+          <input id="offsetSec" type="number" value="0" step="0.01" />
+        </div>
+        <div style="display:flex; align-items:flex-end; gap:8px;">
+          <button id="playBtn" disabled>PLAY</button>
+          <button id="pauseBtn" class="secondary" disabled>PAUSE</button>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <span id="statusPill" class="pill bad">disconnected</span>
+        <span class="muted" id="stateLine"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Logs</label>
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const logBox = $('log');
+    const statusPill = $('statusPill');
+    const stateLine = $('stateLine');
+    const connectBtn = $('connectBtn');
+    const disconnectBtn = $('disconnectBtn');
+    const playBtn = $('playBtn');
+    const pauseBtn = $('pauseBtn');
+
+    let ws = null;
+    function now() { return new Date().toLocaleTimeString(); }
+    function appendLog(direction, payload) {
+      const pre = document.createElement('div');
+      const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      pre.textContent = `[${now()}] ${direction} ${text}`;
+      logBox.appendChild(pre);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    function setConnected(connected) {
+      if (connected) {
+        statusPill.textContent = 'connected';
+        statusPill.classList.add('ok'); statusPill.classList.remove('bad');
+        connectBtn.disabled = true; disconnectBtn.disabled = false;
+        playBtn.disabled = false; pauseBtn.disabled = false;
+      } else {
+        statusPill.textContent = 'disconnected';
+        statusPill.classList.add('bad'); statusPill.classList.remove('ok');
+        connectBtn.disabled = false; disconnectBtn.disabled = true;
+        playBtn.disabled = true; pauseBtn.disabled = true;
+      }
+    }
+
+    connectBtn.onclick = () => {
+      const url = $('wsUrl').value.trim();
+      const role = [...document.querySelectorAll('input[name="role"]')].find(r => r.checked).value;
+      const displayName = $('displayName').value.trim() || 'Debug';
+
+      appendLog('→', `Connecting to ${url} ...`);
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        setConnected(true);
+        const hello = { type: 'HELLO', role, display_name: displayName };
+        ws.send(JSON.stringify(hello));
+        appendLog('→', hello);
+      };
+      ws.onmessage = (ev) => {
+        appendLog('←', ev.data);
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'STATE') {
+            const p = msg.payload || {};
+            stateLine.textContent = `STATE: track=${p.track_id ?? '(none)'} status=${p.status} offset=${p.offset_sec} ts=${p.timestamp}`;
+          }
+        } catch (_) {}
+      };
+      ws.onerror = () => appendLog('!', 'WebSocket error');
+      ws.onclose = (ev) => {
+        appendLog('!', `WebSocket closed (${ev.code}${ev.reason ? ': ' + ev.reason : ''})`);
+        setConnected(false);
+      };
+    };
+
+    disconnectBtn.onclick = () => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+      ws = null;
+    };
+
+    function sendControl(type) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendLog('!', 'Not connected');
+        return;
+      }
+      const msg = {
+        type,
+        track_id: $('trackId').value || null,
+        offset_sec: parseFloat($('offsetSec').value || '0') || 0,
+        timestamp: Date.now() / 1000,
+      };
+      ws.send(JSON.stringify(msg));
+      appendLog('→', msg);
+    }
+
+    playBtn.onclick = () => sendControl('PLAY');
+    pauseBtn.onclick = () => sendControl('PAUSE');
+  </script>
+</body>
+</html>
+
+
