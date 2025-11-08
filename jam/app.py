@@ -94,10 +94,10 @@ async def ws_jam1(websocket: WebSocket):
                     continue
 
                 # Update state
-                state["track_id"] = msg.get("track_id")
+                state["track_id"] = msg["track_id"]
                 state["status"] = msg_type
-                state["offset_sec"] = float(msg.get("offset_sec", 0.0))
-                state["timestamp"] = time.time()
+                state["offset_sec"] = msg["offset_sec"]
+                state["timestamp"] = msg["timestamp"]
 
                 # Broadcast STATE to all (including sender)
                 out = json.dumps({"type": "STATE", "payload": state})
