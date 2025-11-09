@@ -74,13 +74,42 @@
           <label>Blob JSON</label><br />
           <input id="signalBlob" type="text" placeholder='{"hello":"world"}' style="width:100%;" />
         </div>
-        <div style="display:flex; align-items:flex-end;">
+        <div style="display:flex; align-items:flex-end; gap:8px;">
           <button id="signalBtn" class="secondary" disabled>Send SIGNAL</button>
+          <button id="connectP2pBtn">Connect P2P</button>
+          <button id="disconnectP2pBtn" class="secondary">Disconnect P2P</button>
         </div>
       </div>
       <div style="margin-top:10px">
         <span id="statusPill" class="pill bad">disconnected</span>
         <span class="muted" id="stateLine"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Browser Player (Phase 3)</label>
+      <div class="row" style="margin-top:8px">
+        <input id="fileInput" type="file" accept="audio/mpeg,audio/mp3" />
+        <button id="loadMp3Btn">Load MP3 into RAM</button>
+        <div>
+          <label>Start Threshold (KB)</label><br />
+          <input id="startThresholdKB" type="number" value="256" style="width:100px" />
+        </div>
+        <div>
+          <label>Rebuffer Threshold (sec)</label><br />
+          <input id="rebufferThresholdSec" type="number" value="2.0" step="0.1" style="width:100px" />
+        </div>
+        <div>
+          <label>Resume Threshold (sec)</label><br />
+          <input id="resumeThresholdSec" type="number" value="4.0" step="0.1" style="width:100px" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <audio id="audioEl" controls style="width:100%"></audio>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="muted" id="playerStatus">idle</span>
+        <span class="muted" id="bufferInfo" style="margin-left:auto">ahead=0.00s</span>
       </div>
     </div>
 
@@ -133,6 +162,16 @@
     </div>
 
     <div class="card">
+      <label>PeerBuffer Tests</label>
+      <div class="row" style="margin-top:8px">
+        <div class="muted">Uses Total Chunks and Chunk Size from tracker controls above.</div>
+        <div style="margin-left:auto">
+          <button id="runPhase1Btn" class="secondary">Run Phase 1 & 2 tests</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <label>Swarm (jam1)</label>
       <div class="row" style="margin:6px 0 10px;">
         <button id="logPeersBtn" class="secondary">Log peers to console</button>
@@ -159,6 +198,8 @@
     const toPeerIdInput = $('toPeerId');
     const signalBlobInput = $('signalBlob');
     const signalBtn = $('signalBtn');
+    const connectP2pBtn = $('connectP2pBtn');
+    const disconnectP2pBtn = $('disconnectP2pBtn');
     const roomName = $('roomName');
     const announcePort = $('announcePort');
     const totalChunks = $('totalChunks');
@@ -168,6 +209,15 @@
     const announceBtn = $('announceBtn');
     const deltaIndices = $('deltaIndices');
     const sendDeltaBtn = $('sendDeltaBtn');
+    const runPhase1Btn = $('runPhase1Btn');
+    const fileInput = $('fileInput');
+    const loadMp3Btn = $('loadMp3Btn');
+    const audioEl = $('audioEl');
+    const playerStatus = $('playerStatus');
+    const bufferInfo = $('bufferInfo');
+    const startThresholdKB = $('startThresholdKB');
+    const rebufferThresholdSec = $('rebufferThresholdSec');
+    const resumeThresholdSec = $('resumeThresholdSec');
 
     let ws = null;
     function now() { return new Date().toLocaleTimeString(); }
@@ -210,7 +260,7 @@
           announceNow();
         }
       };
-      ws.onmessage = (ev) => {
+      ws.onmessage = async (ev) => {
         appendLog('←', ev.data);
         try {
           const msg = JSON.parse(ev.data);
@@ -224,9 +274,38 @@
           } else if (msg.type === 'PEERS') {
             renderSwarm(msg.peers || []);
           } else if (msg.type === 'SIGNAL') {
-            // Show who sent it and the blob contents
             const from = msg.from || '(unknown)';
-            appendLog('←', `SIGNAL from ${from}: ${JSON.stringify(msg.blob)}`);
+            const blob = msg.blob || {};
+            // WebRTC signaling
+            if (blob && blob.wrtc && from !== '(unknown)') {
+              if (blob.wrtc === 'offer') {
+                // Answerer path
+                await createPeerConnection(from, false);
+                try {
+                  await pc.setRemoteDescription(new RTCSessionDescription(blob.sdp));
+                  const answer = await pc.createAnswer();
+                  await pc.setLocalDescription(answer);
+                  sendSignal(from, { wrtc: 'answer', sdp: answer });
+                } catch (e) {
+                  appendLog('!', `offer handling failed`);
+                }
+              } else if (blob.wrtc === 'answer') {
+                try {
+                  await pc.setRemoteDescription(new RTCSessionDescription(blob.sdp));
+                } catch (e) {
+                  appendLog('!', `answer handling failed`);
+                }
+              } else if (blob.wrtc === 'ice' && blob.candidate) {
+                try {
+                  await pc.addIceCandidate(new RTCIceCandidate(blob.candidate));
+                } catch (e) {
+                  // ignore
+                }
+              }
+            } else {
+              // Show who sent it and the blob contents
+              appendLog('←', `SIGNAL from ${from}: ${JSON.stringify(msg.blob)}`);
+            }
           }
         } catch (_) {}
       };
@@ -342,6 +421,480 @@
           console.log('Current peers:', lastPeers);
         } catch (_) {}
         appendLog('ℹ', {peers: lastPeers});
+      };
+    }
+
+    // Phase 1 & 2: In-browser RAM buffer with contiguous guard
+    class PeerBuffer {
+      constructor(numChunks, chunkSize){
+        this.numChunks = numChunks|0;
+        this.chunkSize = chunkSize|0;
+        this.totalSize = this.numChunks * this.chunkSize;
+        this.buffer = new Uint8Array(this.totalSize);
+        this.have = new Array(this.numChunks).fill(false);
+        this.haveCount = 0;
+        this.contiguousChunkEnd = 0; // exclusive
+        this.contiguousByteEnd = 0;  // exclusive
+      }
+      setChunk(index, payload){
+        if (index < 0 || index >= this.numChunks) return false;
+        if (!(payload instanceof Uint8Array)) return false;
+        if (payload.length !== this.chunkSize) return false;
+        const start = index * this.chunkSize;
+        this.buffer.set(payload, start);
+        if (!this.have[index]) {
+          this.have[index] = true;
+          this.haveCount++;
+          // advance contiguous window
+          while (this.contiguousChunkEnd < this.numChunks && this.have[this.contiguousChunkEnd]) {
+            this.contiguousChunkEnd++;
+          }
+          this.contiguousByteEnd = Math.min(this.contiguousChunkEnd * this.chunkSize, this.totalSize);
+        }
+        return true;
+      }
+      readRange(start, length){
+        if (start < 0 || length <= 0) return new Uint8Array(0);
+        const maxEnd = Math.min(this.totalSize, this.contiguousByteEnd);
+        let end = start + length;
+        if (end > maxEnd) end = maxEnd;
+        if (start >= end) return new Uint8Array(0);
+        // Since we clamp to contiguousByteEnd, the slice is safe
+        return this.buffer.slice(start, end);
+      }
+      getLargestContiguousEnd(){
+        return this.contiguousByteEnd;
+      }
+    }
+
+    function uint8eq(a, b){
+      if (a.length !== b.length) return false;
+      for (let i=0;i<a.length;i++){ if (a[i] !== b[i]) return false; }
+      return true;
+    }
+
+    function runPhase1And2Tests(){
+      try {
+        const nChunks = parseInt(totalChunks.value || '0', 10);
+        const cSize = parseInt(chunkSize.value || '0', 10);
+        if (!Number.isFinite(nChunks) || !Number.isFinite(cSize) || nChunks <= 0 || cSize <= 0) {
+          appendLog('!', 'Invalid Total Chunks / Chunk Size');
+          return;
+        }
+        const pb = new PeerBuffer(nChunks, cSize);
+        const total = nChunks * cSize;
+        const source = new Uint8Array(total);
+        for (let i=0;i<total;i++){ source[i] = i & 0xff; }
+
+        // Phase 1: seed all, then read 0..N and compare
+        for (let idx=0; idx<nChunks; idx++){
+          const start = idx * cSize;
+          pb.setChunk(idx, source.slice(start, start + cSize));
+        }
+        const N = Math.min(total - Math.floor(cSize/2), 10 * cSize + 123);
+        const got = pb.readRange(0, N);
+        const exp = source.slice(0, N);
+        const ok1 = uint8eq(got, exp);
+        appendLog(ok1 ? '✓' : '✗', `Phase 1 readRange(0, ${N}) ${ok1 ? 'PASS' : 'FAIL'}`);
+
+        // Phase 2: create a gap at chunk 5, ensure clamp at end of chunk 4
+        const pb2 = new PeerBuffer(nChunks, cSize);
+        // seed chunks 0..4 and 6.. up to some
+        for (let idx=0; idx<nChunks; idx++){
+          if (idx === 5) continue;
+          const start = idx * cSize;
+          pb2.setChunk(idx, source.slice(start, start + cSize));
+        }
+        const want = 7 * cSize; // would span across the gap
+        const got2 = pb2.readRange(0, want);
+        const expectedLen = Math.min(5 * cSize, want);
+        const ok2 = (got2.length === expectedLen);
+        appendLog(ok2 ? '✓' : '✗', `Phase 2 contiguous clamp len=${got2.length} expected=${expectedLen} ${ok2 ? 'PASS' : 'FAIL'}`);
+        appendLog('ℹ', {largestContiguousByteEnd: pb2.getLargestContiguousEnd()});
+      } catch (e) {
+        appendLog('!', `Test error: ${e && e.message ? e.message : e}`);
+      }
+    }
+
+    if (runPhase1Btn) {
+      runPhase1Btn.onclick = runPhase1And2Tests;
+    }
+
+    // Phase 3+: Minimal MSE player fed from active PeerBuffer (host or viewer)
+    let pbActive = null;      // currently playing buffer
+    let pbHost = null;        // host's buffer (when file loaded)
+    let pbRecv = null;        // viewer's download buffer
+    let fileSizeBytes = 0;
+    let mediaSource = null;
+    let sourceBuffer = null;
+    let mseAppendedBytes = 0;
+    let appendTimer = null;
+    let rebufferTimer = null;
+    let awaitingStart = true;
+    let autoPaused = false;
+    let manualPaused = false;
+    let mediaObjectUrl = null;
+
+    function setPlayerStatus(text){
+      if (playerStatus) playerStatus.textContent = text;
+    }
+
+    function initMediaSource(){
+      if (!audioEl) return;
+      // Cleanup previous media source if any
+      try {
+        if (appendTimer) { clearInterval(appendTimer); appendTimer = null; }
+        if (rebufferTimer) { clearInterval(rebufferTimer); rebufferTimer = null; }
+        if (mediaSource && mediaSource.readyState === 'open') {
+          try { mediaSource.endOfStream(); } catch (_) {}
+        }
+        if (mediaObjectUrl) {
+          try { URL.revokeObjectURL(mediaObjectUrl); } catch (_) {}
+          mediaObjectUrl = null;
+        }
+      } catch (_) {}
+      mediaSource = new MediaSource();
+      mediaObjectUrl = URL.createObjectURL(mediaSource);
+      audioEl.src = mediaObjectUrl;
+      mediaSource.addEventListener('sourceopen', () => {
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+          sourceBuffer.mode = 'sequence';
+          sourceBuffer.addEventListener('updateend', () => {
+            maybeStartOrResume();
+          });
+          setPlayerStatus('MSE ready');
+        } catch (e) {
+          setPlayerStatus(`MSE init error: ${e && e.message ? e.message : e}`);
+        }
+      }, { once: true });
+    }
+
+    function getBufferedAheadSec(){
+      if (!audioEl) return 0;
+      const t = audioEl.currentTime || 0;
+      const ranges = audioEl.buffered;
+      for (let i=0;i<ranges.length;i++){
+        const start = ranges.start(i);
+        const end = ranges.end(i);
+        if (t >= start && t <= end) {
+          return Math.max(0, end - t);
+        }
+      }
+      return 0;
+    }
+
+    function maybeStartOrResume(){
+      if (!audioEl) return;
+      // Respect manual pause; don't auto-resume if user paused
+      if (manualPaused) return;
+      const startKB = parseFloat(startThresholdKB && startThresholdKB.value ? startThresholdKB.value : '256') || 256;
+      const startBytes = Math.max(0, Math.floor(startKB * 1024));
+      const playable = pbActive ? pbActive.getLargestContiguousEnd() : 0;
+      if (awaitingStart && playable >= startBytes) {
+        audioEl.play().then(() => {
+          awaitingStart = false;
+          autoPaused = false;
+        }).catch(() => {});
+      } else if (autoPaused) {
+        const threshSec = Math.max(0.1, parseFloat(rebufferThresholdSec && rebufferThresholdSec.value ? rebufferThresholdSec.value : '2.0') || 2.0);
+        let resumeSec = parseFloat(resumeThresholdSec && resumeThresholdSec.value ? resumeThresholdSec.value : '4.0');
+        if (!Number.isFinite(resumeSec) || resumeSec <= 0) resumeSec = Math.max(threshSec * 2, threshSec + 0.5);
+        const ahead = getBufferedAheadSec();
+        if (ahead >= resumeSec) {
+          audioEl.play().then(() => { autoPaused = false; }).catch(() => {});
+        }
+      }
+    }
+
+    function startAppendLoop(){
+      if (appendTimer) {
+        clearInterval(appendTimer);
+        appendTimer = null;
+      }
+      mseAppendedBytes = 0;
+      awaitingStart = true;
+      autoPaused = false;
+      manualPaused = false;
+      appendTimer = setInterval(() => {
+        if (!pbActive || !sourceBuffer || !mediaSource) return;
+        if (sourceBuffer.updating) return;
+        const playableEnd = Math.min(pbActive.getLargestContiguousEnd(), fileSizeBytes);
+        if (mseAppendedBytes >= playableEnd) return;
+        const toAppend = pbActive.readRange(mseAppendedBytes, playableEnd - mseAppendedBytes);
+        if (toAppend && toAppend.length > 0) {
+          try {
+            sourceBuffer.appendBuffer(toAppend);
+            mseAppendedBytes += toAppend.length;
+            setPlayerStatus(`appended=${mseAppendedBytes}/${fileSizeBytes}`);
+            // End of stream if fully appended
+            if (mseAppendedBytes >= fileSizeBytes && mediaSource.readyState === 'open') {
+              try { mediaSource.endOfStream(); } catch (_) {}
+            }
+            // Check if we can start/resume after appending
+            maybeStartOrResume();
+          } catch (e) {
+            setPlayerStatus(`append error: ${e && e.message ? e.message : e}`);
+          }
+        }
+      }, 200);
+      // Start/refresh rebuffer monitor
+      if (rebufferTimer) {
+        clearInterval(rebufferTimer);
+        rebufferTimer = null;
+      }
+      rebufferTimer = setInterval(() => {
+        const ahead = getBufferedAheadSec();
+        if (bufferInfo) {
+          try { bufferInfo.textContent = `ahead=${ahead.toFixed(2)}s`; } catch (_) {}
+        }
+        const threshSec = Math.max(0.1, parseFloat(rebufferThresholdSec && rebufferThresholdSec.value ? rebufferThresholdSec.value : '2.0') || 2.0);
+        if (!awaitingStart && !audioEl.paused && ahead < threshSec) {
+          // Auto-pause to prevent glitching; continue appending
+          try { audioEl.pause(); autoPaused = true; manualPaused = false; } catch (_) {}
+        } else if (autoPaused) {
+          maybeStartOrResume();
+        }
+      }, 300);
+    }
+
+    if (loadMp3Btn) {
+      loadMp3Btn.onclick = async () => {
+        const file = (fileInput && fileInput.files && fileInput.files[0]) ? fileInput.files[0] : null;
+        if (!file) {
+          appendLog('!', 'Select an MP3 file first');
+          return;
+        }
+        const cSize = parseInt(chunkSize.value || '0', 10);
+        if (!Number.isFinite(cSize) || cSize <= 0) {
+          appendLog('!', 'Invalid Chunk Size');
+          return;
+        }
+        try {
+          setPlayerStatus('reading file...');
+          const buf = new Uint8Array(await file.arrayBuffer());
+          fileSizeBytes = buf.length;
+          const nChunks = Math.ceil(fileSizeBytes / cSize);
+          if (totalChunks) totalChunks.value = String(nChunks);
+          pbHost = new PeerBuffer(nChunks, cSize);
+          // Fill chunks; pad final chunk if needed
+          for (let idx=0; idx<nChunks; idx++){
+            const start = idx * cSize;
+            const end = Math.min(start + cSize, fileSizeBytes);
+            const slice = buf.slice(start, end);
+            let payload = slice;
+            if (slice.length < cSize) {
+              const padded = new Uint8Array(cSize);
+              padded.set(slice, 0);
+              payload = padded;
+            }
+            pbHost.setChunk(idx, payload);
+          }
+          pbActive = pbHost;
+          if (haveCount) haveCount.value = String(pbActive.haveCount);
+          appendLog('ℹ', `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
+          // If a datachannel is already open, push TRACK_META to viewer(s)
+          try {
+            if (dc && dc.readyState === 'open') {
+              const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
+              dc.send(JSON.stringify(meta));
+              appendLog('ℹ', 'Sent TRACK_META to peer');
+            }
+          } catch (_) {}
+          initMediaSource();
+          startAppendLoop();
+        } catch (e) {
+          setPlayerStatus(`load error: ${e && e.message ? e.message : e}`);
+        }
+      };
+    }
+
+    // Rewire global Play/Pause buttons to control the browser player
+    if (playBtn) {
+      playBtn.onclick = () => {
+        if (!audioEl) return;
+        manualPaused = false;
+        awaitingStart = false;
+        audioEl.play().catch(() => {});
+      };
+    }
+
+    // ---- Phase 9: WebRTC DataChannel P2P for chunk transfer ----
+    const rtcConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
+    let pc = null;
+    let dc = null;
+    let pendingDataHeader = null; // {index, length}
+    let inflight = 0;
+    let inflightMax = 8;
+    let nextToRequest = 0;
+    let recvNumChunks = 0;
+    let recvChunkSize = 0;
+
+    function resetP2P(){
+      try { if (dc) dc.close(); } catch (_) {}
+      try { if (pc) pc.close(); } catch (_) {}
+      pc = null; dc = null;
+      pendingDataHeader = null;
+      inflight = 0; nextToRequest = 0;
+      recvNumChunks = 0; recvChunkSize = 0;
+    }
+
+    function sendSignal(to, blob){
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendLog('!', 'Not connected (WS) for signaling');
+        return;
+      }
+      const msg = { type: 'SIGNAL', to, blob };
+      ws.send(JSON.stringify(msg));
+      appendLog('→', {SIGNAL: blob});
+    }
+
+    async function createPeerConnection(toPeerId, isInitiator){
+      resetP2P();
+      pc = new RTCPeerConnection(rtcConfig);
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          sendSignal(toPeerId, { wrtc: 'ice', candidate: e.candidate });
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        appendLog('ℹ', `pc state=${pc.connectionState}`);
+      };
+      if (isInitiator) {
+        dc = pc.createDataChannel('data', { ordered: true });
+        wireDataChannel(dc);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendSignal(toPeerId, { wrtc: 'offer', sdp: offer });
+      } else {
+        pc.ondatachannel = (ev) => {
+          dc = ev.channel;
+          wireDataChannel(dc);
+        };
+      }
+      return pc;
+    }
+
+    function wireDataChannel(channel){
+      channel.binaryType = 'arraybuffer';
+      channel.onopen = () => {
+        appendLog('ℹ', 'datachannel open');
+        // If we are the host (have pbHost loaded), send TRACK_META
+        if (pbHost && channel.readyState === 'open') {
+          const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
+          channel.send(JSON.stringify(meta));
+        }
+      };
+      channel.onclose = () => appendLog('ℹ', 'datachannel close');
+      channel.onerror = (e) => appendLog('!', `datachannel error ${e && e.message ? e.message : ''}`);
+      channel.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          handleDCText(ev.data);
+        } else if (ev.data instanceof ArrayBuffer) {
+          handleDCBinary(new Uint8Array(ev.data));
+        } else {
+          // Blob fallback
+          if (ev.data && ev.data.arrayBuffer) {
+            ev.data.arrayBuffer().then(buf => handleDCBinary(new Uint8Array(buf)));
+          }
+        }
+      };
+    }
+
+    function handleDCText(text){
+      try {
+        const msg = JSON.parse(text);
+        if (msg.t === 'TRACK_META') {
+          // Viewer path: initialize receiver buffer and player
+          recvNumChunks = msg.numChunks|0;
+          recvChunkSize = msg.chunkSize|0;
+          const total = msg.totalSize|0;
+          inflight = 0;
+          nextToRequest = 0;
+          pbRecv = new PeerBuffer(recvNumChunks, recvChunkSize);
+          pbActive = pbRecv;
+          fileSizeBytes = total;
+          if (totalChunks) totalChunks.value = String(recvNumChunks);
+          if (chunkSize) chunkSize.value = String(recvChunkSize);
+          initMediaSource();
+          startAppendLoop();
+          // Kick off requests
+          scheduleRequests();
+        } else if (msg.t === 'REQUEST') {
+          // Host path: send requested chunk back
+          const idx = msg.index|0;
+          if (!pbHost || !dc || dc.readyState !== 'open') return;
+          if (idx < 0 || idx >= pbHost.numChunks) return;
+          const start = idx * pbHost.chunkSize;
+          const payload = pbHost.readRange(start, pbHost.chunkSize);
+          // Always send full chunkSize bytes (payload will be chunkSize since pbHost seeded)
+          const header = { t: 'DATA', index: idx, length: payload.length };
+          try {
+            dc.send(JSON.stringify(header));
+            dc.send(payload);
+          } catch (e) {
+            appendLog('!', `send DATA failed idx=${idx}`);
+          }
+        } else if (msg.t === 'DATA') {
+          // Expect binary next
+          pendingDataHeader = { index: msg.index|0, length: msg.length|0 };
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    function handleDCBinary(bytes){
+      if (!pendingDataHeader || !pbRecv) return;
+      const { index, length } = pendingDataHeader;
+      pendingDataHeader = null;
+      if (bytes.length !== length) {
+        appendLog('!', `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`);
+        return;
+      }
+      // Ensure chunk is chunkSize; pad if needed
+      let payload = bytes;
+      if (bytes.length !== pbRecv.chunkSize) {
+        const padded = new Uint8Array(pbRecv.chunkSize);
+        padded.set(bytes, 0);
+        payload = padded;
+      }
+      pbRecv.setChunk(index, payload);
+      inflight = Math.max(0, inflight - 1);
+      if (haveCount) haveCount.value = String(pbRecv.haveCount);
+      scheduleRequests();
+    }
+
+    function scheduleRequests(){
+      if (!dc || dc.readyState !== 'open' || !pbRecv) return;
+      while (inflight < inflightMax && nextToRequest < pbRecv.numChunks) {
+        if (!pbRecv.have[nextToRequest]) {
+          const msg = { t: 'REQUEST', index: nextToRequest };
+          try { dc.send(JSON.stringify(msg)); inflight++; } catch (_) {}
+        }
+        nextToRequest++;
+      }
+    }
+
+    if (connectP2pBtn) {
+      connectP2pBtn.onclick = async () => {
+        const to = (toPeerIdInput && toPeerIdInput.value || '').trim();
+        if (!to) { appendLog('!', 'Enter target peer id'); return; }
+        if (!ws || ws.readyState !== WebSocket.OPEN) { appendLog('!', 'Connect WS first'); return; }
+        await createPeerConnection(to, true);
+      };
+    }
+    if (disconnectP2pBtn) {
+      disconnectP2pBtn.onclick = () => {
+        resetP2P();
+        appendLog('ℹ', 'P2P disconnected');
+      };
+    }
+    if (pauseBtn) {
+      pauseBtn.onclick = () => {
+        if (!audioEl) return;
+        manualPaused = true;
+        audioEl.pause();
       };
     }
   </script>
