@@ -220,6 +220,7 @@
     const resumeThresholdSec = $('resumeThresholdSec');
 
     let ws = null;
+    let currentRole = 'viewer';
     function now() { return new Date().toLocaleTimeString(); }
     function appendLog(direction, payload) {
       const pre = document.createElement('div');
@@ -233,13 +234,14 @@
         statusPill.textContent = 'connected';
         statusPill.classList.add('ok'); statusPill.classList.remove('bad');
         connectBtn.disabled = true; disconnectBtn.disabled = false;
-        playBtn.disabled = false; pauseBtn.disabled = false; signalBtn.disabled = false;
+        playBtn.disabled = (currentRole !== 'host'); pauseBtn.disabled = (currentRole !== 'host'); signalBtn.disabled = false;
       } else {
         statusPill.textContent = 'disconnected';
         statusPill.classList.add('bad'); statusPill.classList.remove('ok');
         connectBtn.disabled = false; disconnectBtn.disabled = true;
         playBtn.disabled = true; pauseBtn.disabled = true; signalBtn.disabled = true;
         myPeerIdInput.value = '(none)';
+        playAuthorized = false;
       }
     }
 
@@ -247,6 +249,7 @@
       const url = $('wsUrl').value.trim();
       const role = [...document.querySelectorAll('input[name="role"]')].find(r => r.checked).value;
       const displayName = $('displayName').value.trim() || 'Debug';
+      currentRole = role;
 
       appendLog('→', `Connecting to ${url} ...`);
       ws = new WebSocket(url);
@@ -267,12 +270,24 @@
           if (msg.type === 'STATE') {
             const p = msg.payload || {};
             stateLine.textContent = `STATE: track=${p.track_id ?? '(none)'} status=${p.status} offset=${p.offset_sec} ts=${p.timestamp}`;
+            // Host broadcasts control; all clients honor it
+            playAuthorized = (p.status === 'PLAY');
+            if (p.status === 'PLAY') {
+              manualPaused = false;
+              maybeStartOrResume();
+            } else if (p.status === 'PAUSE') {
+              try { if (audioEl) audioEl.pause(); } catch (_) {}
+              autoPaused = false;
+              // Keep awaitingStart true to require threshold on next PLAY
+              awaitingStart = true;
+            }
           } else if (msg.type === 'PEER') {
             if (msg.peer_id) {
               myPeerIdInput.value = msg.peer_id;
             }
           } else if (msg.type === 'PEERS') {
             renderSwarm(msg.peers || []);
+            try { ensureConnections(msg.peers || []); } catch (_) {}
           } else if (msg.type === 'SIGNAL') {
             const from = msg.from || '(unknown)';
             const blob = msg.blob || {};
@@ -280,7 +295,7 @@
             if (blob && blob.wrtc && from !== '(unknown)') {
               if (blob.wrtc === 'offer') {
                 // Answerer path
-                await createPeerConnection(from, false);
+                const pc = await createPeerConnection(from, false);
                 try {
                   await pc.setRemoteDescription(new RTCSessionDescription(blob.sdp));
                   const answer = await pc.createAnswer();
@@ -291,13 +306,19 @@
                 }
               } else if (blob.wrtc === 'answer') {
                 try {
-                  await pc.setRemoteDescription(new RTCSessionDescription(blob.sdp));
+                  const pc = pcByPeer.get(from);
+                  if (pc) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(blob.sdp));
+                  }
                 } catch (e) {
                   appendLog('!', `answer handling failed`);
                 }
               } else if (blob.wrtc === 'ice' && blob.candidate) {
                 try {
-                  await pc.addIceCandidate(new RTCIceCandidate(blob.candidate));
+                  const pc = pcByPeer.get(from);
+                  if (pc) {
+                    await pc.addIceCandidate(new RTCIceCandidate(blob.candidate));
+                  }
                 } catch (e) {
                   // ignore
                 }
@@ -534,6 +555,7 @@
     let autoPaused = false;
     let manualPaused = false;
     let mediaObjectUrl = null;
+    let playAuthorized = false; // controlled by WS STATE from host
 
     function setPlayerStatus(text){
       if (playerStatus) playerStatus.textContent = text;
@@ -586,6 +608,8 @@
 
     function maybeStartOrResume(){
       if (!audioEl) return;
+      // Only start/resume when host has sent PLAY
+      if (!playAuthorized) return;
       // Respect manual pause; don't auto-resume if user paused
       if (manualPaused) return;
       const startKB = parseFloat(startThresholdKB && startThresholdKB.value ? startThresholdKB.value : '256') || 256;
@@ -695,11 +719,13 @@
           appendLog('ℹ', `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
           // If a datachannel is already open, push TRACK_META to viewer(s)
           try {
-            if (dc && dc.readyState === 'open') {
-              const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
-              dc.send(JSON.stringify(meta));
-              appendLog('ℹ', 'Sent TRACK_META to peer');
+            const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
+            for (const [pid, ch] of dcByPeer.entries()) {
+              if (ch && ch.readyState === 'open') {
+                try { ch.send(JSON.stringify(meta)); } catch (_) {}
+              }
             }
+            appendLog('ℹ', 'Sent TRACK_META to open peers');
           } catch (_) {}
           initMediaSource();
           startAppendLoop();
@@ -709,20 +735,14 @@
       };
     }
 
-    // Rewire global Play/Pause buttons to control the browser player
-    if (playBtn) {
-      playBtn.onclick = () => {
-        if (!audioEl) return;
-        manualPaused = false;
-        awaitingStart = false;
-        audioEl.play().catch(() => {});
-      };
-    }
+    // Keep Play/Pause as host-only WS controls; backend enforces; viewers' buttons remain disabled
 
     // ---- Phase 9: WebRTC DataChannel P2P for chunk transfer ----
     const rtcConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
-    let pc = null;
-    let dc = null;
+    // Per-peer connections/channels
+    const pcByPeer = new Map();
+    const dcByPeer = new Map();
+    let primaryUpstreamPeerId = null;
     let pendingDataHeader = null; // {index, length}
     let inflight = 0;
     let inflightMax = 8;
@@ -731,9 +751,11 @@
     let recvChunkSize = 0;
 
     function resetP2P(){
-      try { if (dc) dc.close(); } catch (_) {}
-      try { if (pc) pc.close(); } catch (_) {}
-      pc = null; dc = null;
+      try { for (const ch of dcByPeer.values()) { try { ch.close(); } catch (_) {} } } catch (_) {}
+      try { for (const p of pcByPeer.values()) { try { p.close(); } catch (_) {} } } catch (_) {}
+      pcByPeer.clear();
+      dcByPeer.clear();
+      primaryUpstreamPeerId = null;
       pendingDataHeader = null;
       inflight = 0; nextToRequest = 0;
       recvNumChunks = 0; recvChunkSize = 0;
@@ -750,58 +772,74 @@
     }
 
     async function createPeerConnection(toPeerId, isInitiator){
-      resetP2P();
-      pc = new RTCPeerConnection(rtcConfig);
+      if (pcByPeer.has(toPeerId)) {
+        return pcByPeer.get(toPeerId);
+      }
+      const pc = new RTCPeerConnection(rtcConfig);
+      pcByPeer.set(toPeerId, pc);
       pc.onicecandidate = (e) => {
         if (e.candidate) {
           sendSignal(toPeerId, { wrtc: 'ice', candidate: e.candidate });
         }
       };
       pc.onconnectionstatechange = () => {
-        appendLog('ℹ', `pc state=${pc.connectionState}`);
+        appendLog('ℹ', `pc(${toPeerId}) state=${pc.connectionState}`);
+        if (pc.connectionState === 'closed' || pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          try { const ch = dcByPeer.get(toPeerId); if (ch) { try { ch.close(); } catch (_) {} } } catch (_) {}
+          dcByPeer.delete(toPeerId);
+          pcByPeer.delete(toPeerId);
+          if (primaryUpstreamPeerId === toPeerId) {
+            primaryUpstreamPeerId = null;
+          }
+        }
       };
       if (isInitiator) {
-        dc = pc.createDataChannel('data', { ordered: true });
-        wireDataChannel(dc);
+        const dc = pc.createDataChannel('data', { ordered: true });
+        dcByPeer.set(toPeerId, dc);
+        wireDataChannel(dc, toPeerId);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         sendSignal(toPeerId, { wrtc: 'offer', sdp: offer });
       } else {
         pc.ondatachannel = (ev) => {
-          dc = ev.channel;
-          wireDataChannel(dc);
+          const ch = ev.channel;
+          dcByPeer.set(toPeerId, ch);
+          wireDataChannel(ch, toPeerId);
         };
       }
       return pc;
     }
 
-    function wireDataChannel(channel){
+    function wireDataChannel(channel, peerId){
       channel.binaryType = 'arraybuffer';
       channel.onopen = () => {
-        appendLog('ℹ', 'datachannel open');
+        appendLog('ℹ', `datachannel open (${peerId})`);
+        if (primaryUpstreamPeerId === null) {
+          primaryUpstreamPeerId = peerId;
+        }
         // If we are the host (have pbHost loaded), send TRACK_META
         if (pbHost && channel.readyState === 'open') {
           const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
           channel.send(JSON.stringify(meta));
         }
       };
-      channel.onclose = () => appendLog('ℹ', 'datachannel close');
-      channel.onerror = (e) => appendLog('!', `datachannel error ${e && e.message ? e.message : ''}`);
+      channel.onclose = () => appendLog('ℹ', `datachannel close (${peerId})`);
+      channel.onerror = (e) => appendLog('!', `datachannel error (${peerId}) ${e && e.message ? e.message : ''}`);
       channel.onmessage = (ev) => {
         if (typeof ev.data === 'string') {
-          handleDCText(ev.data);
+          handleDCText(ev.data, channel, peerId);
         } else if (ev.data instanceof ArrayBuffer) {
-          handleDCBinary(new Uint8Array(ev.data));
+          handleDCBinary(new Uint8Array(ev.data), channel, peerId);
         } else {
           // Blob fallback
           if (ev.data && ev.data.arrayBuffer) {
-            ev.data.arrayBuffer().then(buf => handleDCBinary(new Uint8Array(buf)));
+            ev.data.arrayBuffer().then(buf => handleDCBinary(new Uint8Array(buf), channel, peerId));
           }
         }
       };
     }
 
-    function handleDCText(text){
+    function handleDCText(text, channel, peerId){
       try {
         const msg = JSON.parse(text);
         if (msg.t === 'TRACK_META') {
@@ -823,15 +861,15 @@
         } else if (msg.t === 'REQUEST') {
           // Host path: send requested chunk back
           const idx = msg.index|0;
-          if (!pbHost || !dc || dc.readyState !== 'open') return;
+          if (!pbHost || !channel || channel.readyState !== 'open') return;
           if (idx < 0 || idx >= pbHost.numChunks) return;
           const start = idx * pbHost.chunkSize;
           const payload = pbHost.readRange(start, pbHost.chunkSize);
           // Always send full chunkSize bytes (payload will be chunkSize since pbHost seeded)
           const header = { t: 'DATA', index: idx, length: payload.length };
           try {
-            dc.send(JSON.stringify(header));
-            dc.send(payload);
+            channel.send(JSON.stringify(header));
+            channel.send(payload);
           } catch (e) {
             appendLog('!', `send DATA failed idx=${idx}`);
           }
@@ -844,7 +882,7 @@
       }
     }
 
-    function handleDCBinary(bytes){
+    function handleDCBinary(bytes, channel, peerId){
       if (!pendingDataHeader || !pbRecv) return;
       const { index, length } = pendingDataHeader;
       pendingDataHeader = null;
@@ -865,8 +903,23 @@
       scheduleRequests();
     }
 
+    function getUpstreamDc(){
+      let ch = primaryUpstreamPeerId ? dcByPeer.get(primaryUpstreamPeerId) : null;
+      if (!ch || ch.readyState !== 'open') {
+        for (const [pid, c] of dcByPeer.entries()) {
+          if (c && c.readyState === 'open') {
+            primaryUpstreamPeerId = pid;
+            return c;
+          }
+        }
+        return null;
+      }
+      return ch;
+    }
+
     function scheduleRequests(){
-      if (!dc || dc.readyState !== 'open' || !pbRecv) return;
+      const dc = getUpstreamDc();
+      if (!dc || !pbRecv) return;
       while (inflight < inflightMax && nextToRequest < pbRecv.numChunks) {
         if (!pbRecv.have[nextToRequest]) {
           const msg = { t: 'REQUEST', index: nextToRequest };
@@ -874,6 +927,17 @@
         }
         nextToRequest++;
       }
+    }
+
+    function ensureConnections(peers){
+      const myId = (myPeerIdInput && myPeerIdInput.value && myPeerIdInput.value !== '(none)') ? myPeerIdInput.value : null;
+      (peers || []).forEach(p => {
+        const pid = p && p.peer_id;
+        if (!pid) return;
+        if (pcByPeer.has(pid)) return;
+        const initiate = !!(myId && String(myId) < String(pid));
+        createPeerConnection(pid, initiate).catch(() => {});
+      });
     }
 
     if (connectP2pBtn) {
@@ -890,13 +954,7 @@
         appendLog('ℹ', 'P2P disconnected');
       };
     }
-    if (pauseBtn) {
-      pauseBtn.onclick = () => {
-        if (!audioEl) return;
-        manualPaused = true;
-        audioEl.pause();
-      };
-    }
+    // Viewers cannot pause locally via these buttons; local pause is handled by buffer logic
   </script>
 </body>
 </html>
