@@ -4,6 +4,9 @@ import os
 import socket
 import sys
 import threading
+import json
+import time
+from queue import Queue, Empty
 from typing import Optional, Set, Tuple
 
 
@@ -52,6 +55,7 @@ class PeerState:
         self.buffer = bytearray(self.total_size)
         self.have: Set[int] = set()
         self.lock = threading.Lock()
+        self.on_have_callback = None  # type: Optional[callable]
         if seed:
             # Preload backing buffer with random bytes and mark all as present
             for i in range(self.num_chunks):
@@ -77,6 +81,12 @@ class PeerState:
             start = index * self.chunk_size
             self.buffer[start:start + self.chunk_size] = payload
             self.have.add(index)
+        cb = self.on_have_callback
+        if cb:
+            try:
+                cb(index)
+            except Exception:
+                pass
 
     def have_all(self) -> bool:
         with self.lock:
@@ -216,6 +226,112 @@ def run_client(connect_to: Tuple[str, int], inflight: int, state: PeerState) -> 
                 pass
 
 
+class TrackerClient:
+    def __init__(self, ws_url: str, room: str, listen_port: int, state: PeerState):
+        self.ws_url = ws_url
+        self.room = room
+        self.listen_port = listen_port
+        self.state = state
+        self.ws = None
+        self.stop_event = threading.Event()
+        self.reader_thread = None
+        self.flush_thread = None
+        self.pending_indices: Set[int] = set()
+        self.pending_lock = threading.Lock()
+
+    def start(self) -> None:
+        try:
+            from websocket import create_connection  # websocket-client
+        except Exception:
+            print("[peer] tracker disabled: install websocket-client (pip install websocket-client)", file=sys.stderr)
+            return
+        try:
+            self.ws = create_connection(self.ws_url, timeout=5)
+        except Exception as e:
+            print(f"[peer] tracker connect failed: {e}", file=sys.stderr)
+            self.ws = None
+            return
+        # Send HELLO
+        hello = {"type": "HELLO", "role": "viewer", "display_name": "peer"}
+        try:
+            self.ws.send(json.dumps(hello))
+        except Exception:
+            pass
+
+        # Reader thread (optional; we just drain to keep connection healthy)
+        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader_thread.start()
+
+        # Send initial ANNOUNCE
+        have_count = 0
+        with self.state.lock:
+            have_count = len(self.state.have)
+        announce = {
+            "type": "ANNOUNCE",
+            "room": self.room,
+            "port": self.listen_port,
+            "total_chunks": self.state.num_chunks,
+            "chunk_size": self.state.chunk_size,
+            "have_count": have_count,
+        }
+        try:
+            print(f"[peer] tracker ANNOUNCE payload: {json.dumps(announce)}")
+        except Exception:
+            pass
+        try:
+            self.ws.send(json.dumps(announce))
+            print(f"[peer] tracker ANNOUNCE room={self.room} port={self.listen_port} have_count={have_count}")
+        except Exception as e:
+            print(f"[peer] tracker announce failed: {e}", file=sys.stderr)
+
+        # Start periodic flush for HAVE_DELTA
+        self.flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self.flush_thread.start()
+
+        # Hook into state to collect deltas
+        self.state.on_have_callback = self.enqueue_have
+
+    def enqueue_have(self, index: int) -> None:
+        with self.pending_lock:
+            self.pending_indices.add(index)
+
+    def _reader_loop(self) -> None:
+        # Drain messages; ignore content
+        while not self.stop_event.is_set():
+            try:
+                msg = self.ws.recv()
+            except Exception:
+                break
+            # Optionally, we could parse PEERS for debugging
+            # But for now, we drop it
+            if not msg:
+                break
+
+    def _flush_loop(self) -> None:
+        while not self.stop_event.is_set():
+            time.sleep(1.0)
+            with self.pending_lock:
+                if not self.pending_indices:
+                    continue
+                indices = sorted(self.pending_indices)
+                self.pending_indices.clear()
+            payload = {"type": "HAVE_DELTA", "room": self.room, "indices": indices}
+            try:
+                if self.ws:
+                    self.ws.send(json.dumps(payload))
+                    print(f"[peer] tracker HAVE_DELTA count={len(indices)}")
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        self.stop_event.set()
+        try:
+            if self.ws:
+                self.ws.close()
+        except Exception:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Unified peer (seed or leecher) with raw TCP protocol.")
     parser.add_argument("--listen-port", type=int, required=True, help="Port to listen on")
@@ -224,6 +340,8 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, required=True, help="Chunk size in bytes")
     parser.add_argument("--connect", type=parse_host_port, help="Optional HOST:PORT to connect to as leecher")
     parser.add_argument("--inflight", type=int, default=4, help="Max in-flight REQUESTs while leeching")
+    parser.add_argument("--tracker-ws", type=str, help="Optional tracker WebSocket (e.g. ws://127.0.0.1:8000/ws/jam1)")
+    parser.add_argument("--room", type=str, default="jam1", help="Tracker room name (default: jam1)")
     args = parser.parse_args()
 
     if args.listen_port <= 0 or args.listen_port > 65535:
@@ -240,6 +358,10 @@ def main() -> None:
         sys.exit(2)
 
     state = PeerState(args.num_chunks, args.chunk_size, seed=args.seed)
+    tracker: Optional[TrackerClient] = None
+    if args.tracker_ws:
+        tracker = TrackerClient(args.tracker_ws, args.room, args.listen_port, state)
+        tracker.start()
 
     stop_event = threading.Event()
     server_thread = threading.Thread(target=run_server, args=(args.listen_port, state, stop_event), daemon=False)
@@ -259,6 +381,9 @@ def main() -> None:
     except KeyboardInterrupt:
         stop_event.set()
         server_thread.join()
+    finally:
+        if tracker:
+            tracker.close()
 
 
 if __name__ == "__main__":

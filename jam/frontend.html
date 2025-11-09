@@ -88,6 +88,62 @@
       <label>Logs</label>
       <div id="log" class="log"></div>
     </div>
+
+    <div class="card">
+      <label>Tracker Peer Controls</label>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>Room</label><br />
+          <input id="roomName" type="text" value="jam1" size="10" />
+        </div>
+        <div>
+          <label>Announce Port</label><br />
+          <input id="announcePort" type="number" value="9005" />
+        </div>
+        <div>
+          <label>Total Chunks</label><br />
+          <input id="totalChunks" type="number" value="12" />
+        </div>
+        <div>
+          <label>Chunk Size</label><br />
+          <input id="chunkSize" type="number" value="4096" />
+        </div>
+        <div>
+          <label>Have Count</label><br />
+          <input id="haveCount" type="number" value="0" />
+        </div>
+        <div style="display:flex; align-items:flex-end; gap:8px;">
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input id="autoAnnounce" type="checkbox" checked /> auto-announce on connect
+          </label>
+        </div>
+        <div style="display:flex; align-items:flex-end;">
+          <button id="announceBtn">Announce</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:1; min-width:260px;">
+          <label>HAVE_DELTA indices (comma-separated)</label><br />
+          <input id="deltaIndices" type="text" placeholder="e.g. 1,2,3" style="width:100%;" />
+        </div>
+        <div style="display:flex; align-items:flex-end;">
+          <button id="sendDeltaBtn" class="secondary">Send HAVE_DELTA</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Swarm (jam1)</label>
+      <div class="row" style="margin:6px 0 10px;">
+        <button id="logPeersBtn" class="secondary">Log peers to console</button>
+      </div>
+      <table id="swarmTable" style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead>
+          <tr><th style="text-align:left;">Peer</th><th>IP</th><th>Port</th><th>Have</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 
   <script>
@@ -103,6 +159,15 @@
     const toPeerIdInput = $('toPeerId');
     const signalBlobInput = $('signalBlob');
     const signalBtn = $('signalBtn');
+    const roomName = $('roomName');
+    const announcePort = $('announcePort');
+    const totalChunks = $('totalChunks');
+    const chunkSize = $('chunkSize');
+    const haveCount = $('haveCount');
+    const autoAnnounce = $('autoAnnounce');
+    const announceBtn = $('announceBtn');
+    const deltaIndices = $('deltaIndices');
+    const sendDeltaBtn = $('sendDeltaBtn');
 
     let ws = null;
     function now() { return new Date().toLocaleTimeString(); }
@@ -141,6 +206,9 @@
         const hello = { type: 'HELLO', role, display_name: displayName };
         ws.send(JSON.stringify(hello));
         appendLog('→', hello);
+        if (autoAnnounce.checked) {
+          announceNow();
+        }
       };
       ws.onmessage = (ev) => {
         appendLog('←', ev.data);
@@ -153,6 +221,8 @@
             if (msg.peer_id) {
               myPeerIdInput.value = msg.peer_id;
             }
+          } else if (msg.type === 'PEERS') {
+            renderSwarm(msg.peers || []);
           } else if (msg.type === 'SIGNAL') {
             // Show who sent it and the blob contents
             const from = msg.from || '(unknown)';
@@ -211,6 +281,69 @@
       ws.send(JSON.stringify(msg));
       appendLog('→', msg);
     };
+
+    function announceNow() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendLog('!', 'Not connected');
+        return;
+      }
+      const msg = {
+        type: 'ANNOUNCE',
+        room: roomName.value || 'jam1',
+        port: parseInt(announcePort.value || '0', 10),
+        total_chunks: parseInt(totalChunks.value || '0', 10),
+        chunk_size: parseInt(chunkSize.value || '0', 10),
+        have_count: parseInt(haveCount.value || '0', 10),
+      };
+      ws.send(JSON.stringify(msg));
+      appendLog('→', msg);
+    }
+    announceBtn.onclick = announceNow;
+
+    sendDeltaBtn.onclick = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendLog('!', 'Not connected');
+        return;
+      }
+      const indices = (deltaIndices.value || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0)
+        .map(s => parseInt(s, 10))
+        .filter(n => Number.isFinite(n));
+      const msg = {
+        type: 'HAVE_DELTA',
+        room: roomName.value || 'jam1',
+        indices,
+      };
+      ws.send(JSON.stringify(msg));
+      appendLog('→', msg);
+    };
+
+    // Swarm rendering
+    const swarmTable = document.querySelector('#swarmTable tbody');
+    const logPeersBtn = document.getElementById('logPeersBtn');
+    let lastPeers = [];
+    function renderSwarm(peers){
+      lastPeers = peers || [];
+      if (!swarmTable) return;
+      swarmTable.innerHTML = '';
+      lastPeers.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td>${p.peer_id}</td><td>${p.ip}</td><td>${p.port}</td><td>${p.have_count ?? 0}</td>`;
+        swarmTable.appendChild(tr);
+      });
+    }
+
+    if (logPeersBtn) {
+      logPeersBtn.onclick = () => {
+        try {
+          console.log('Current peers:', lastPeers);
+        } catch (_) {}
+        appendLog('ℹ', {peers: lastPeers});
+      };
+    }
   </script>
 </body>
 </html>

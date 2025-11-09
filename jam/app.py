@@ -94,6 +94,30 @@ async def ws_jam1(websocket: WebSocket):
     # Send initial STATE immediately
     await websocket.send_text(json.dumps({"type": "STATE", "payload": state}))
 
+    async def push_peers_to_room(room: str):
+        swarm = swarms.get(room, {})
+        # Build full list once
+        full = []
+        for pid, meta in swarm.items():
+            if meta.get("port"):
+                full.append({
+                    "peer_id": pid,
+                    "ip": meta.get("ip"),
+                    "port": meta.get("port"),
+                    "have_count": int(meta.get("have_count") or 0),
+                })
+        # Push to each peer (exclude receiver from peers list)
+        for pid in list(swarm.keys()):
+            ws = ws_by_peer_id.get(pid)
+            if not ws:
+                continue
+            peers = [p for p in full if p["peer_id"] != pid]
+            out = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
+            try:
+                await ws.send_text(json.dumps(out))
+            except Exception:
+                pass
+
     try:
         while True:
             msg_raw = await websocket.receive_text()
@@ -159,6 +183,10 @@ async def ws_jam1(websocket: WebSocket):
                 if isinstance(chunk_size, int):
                     entry["chunk_size"] = chunk_size
                 swarm[caller_id] = entry
+                try:
+                    print(f"ANNOUNCE room={room} peer={caller_id} ip={ip} port={port} have_count={have_count}")
+                except Exception:
+                    pass
                 # Build peers list excluding caller, include have_count
                 peers = []
                 for pid, meta in swarm.items():
@@ -168,6 +196,8 @@ async def ws_jam1(websocket: WebSocket):
                         peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
+                # Broadcast updated peers to everyone in the room
+                await push_peers_to_room(room)
             elif msg_type == "HAVE_DELTA":
                 caller_id = peer_id_by_ws.get(websocket, "unknown")
                 now = time.time()
@@ -183,6 +213,10 @@ async def ws_jam1(websocket: WebSocket):
                     prev = int(entry.get("have_count") or 0)
                     entry["have_count"] = prev + len(indices)
                 swarm[caller_id] = entry
+                try:
+                    print(f"HAVE_DELTA room={room} peer={caller_id} +{len(indices)} have_count={int(entry.get('have_count') or 0)}")
+                except Exception:
+                    pass
                 # Reply with current peers including have_count
                 peers = []
                 for pid, meta in swarm.items():
@@ -192,6 +226,8 @@ async def ws_jam1(websocket: WebSocket):
                         peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
+                # Broadcast updated peers to everyone in the room
+                await push_peers_to_room(room)
             else:
                 await websocket.send_text(json.dumps({"type": "ERROR", "message": f"Unknown type: {msg_type}"}))
                 
@@ -231,7 +267,7 @@ async def cleanup_swarms_task():
                 swarms.pop(track_id, None)
             if removed and swarm:
                 to_notify[track_id] = list(swarm.keys())
-        # Optionally push updated PEERS to remaining peers in affected swarms
+        # Push updated PEERS to remaining peers in affected swarms
         for track_id, peer_ids in to_notify.items():
             swarm = swarms.get(track_id) or {}
             # Build full peers list for this track once
@@ -245,7 +281,6 @@ async def cleanup_swarms_task():
                     continue
                 # Exclude receiver from list
                 peers = [p for p in full_list if p["peer_id"] != pid]
-                # Prefer Option A field name "room", but keep key as-is for back-compat
                 out = {"type": "PEERS", "room": track_id, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 try:
                     await ws.send_text(json.dumps(out))
