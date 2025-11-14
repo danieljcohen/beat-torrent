@@ -11,4 +11,11 @@ Started from commit "fix: removed old debugging logic"
 1. set up consistent dev environment/tooling
 2. refactor code to organize
 
-
+## TODOs
+1. Fix upstream peer selection, p2p instead of only from host
+2. Improve swarm state tracking, only track have count instead of other fields? so update frontend to reflect this too
+3. automatically update have count from p2p transfers
+4. host to viewer heartbeat messages for playback sync
+5. viewer drift correction
+6. error handling, scheduling, UI polishing
+7. stretch goals if all above working: multiple rooms, auth, logging/viz, modularization, playlists/vote
