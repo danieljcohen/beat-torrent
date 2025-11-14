@@ -512,6 +512,8 @@
     let bitmapAnnounceTimer = null;
     // Availability tables: chunk-to-peers mapping
     let peersByChunk = []; // Array<Set<peerId>>
+    // Round-robin peer selection
+    let rrIndex = 0;
 
     function currentNumChunks(){
       if (pbHost && Number.isFinite(pbHost.numChunks)) return pbHost.numChunks|0;
@@ -794,6 +796,37 @@
       return ch;
     }
 
+    function choosePeerForChunk(availablePeers, chunkIndex) {
+      if (!availablePeers || availablePeers.length === 0) return null;
+      
+      // Filter peers that have this chunk
+      const peersWithChunk = availablePeers.filter(peer => {
+        const bm = haveBitmapByPeer.get(peer.pid);
+        return bm && bm[chunkIndex] === 1;
+      });
+
+      // If no peer has it (bitmap incomplete), use all peers
+      const candidates = peersWithChunk.length > 0 ? peersWithChunk : availablePeers;
+      
+      // Round-robin selection
+      const peer = candidates[rrIndex % candidates.length];
+      rrIndex++;
+      return peer;
+    }
+
+    function sendRequest(peerId, chunkIndex) {
+      const ch = dcByPeer.get(peerId);
+      if (!ch || ch.readyState !== 'open') return false;
+      const msg = { t: 'REQUEST', index: chunkIndex };
+      try {
+        ch.send(JSON.stringify(msg));
+        inflight++;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
     // Smart chunk scheduler: 3-phase strategy
     function scheduleRequests(){
       if (!pbRecv) return;
@@ -873,34 +906,17 @@
       // Sort by priority (highest first)
       candidates.sort((a, b) => b.priority - a.priority);
 
-      // Issue requests up to inflightMax
+      // Issue requests up to inflightMax using round-robin peer selection
       let issued = 0;
       for (const cand of candidates) {
         if (inflight >= inflightMax) break;
         const idx = cand.index;
         
-        // Find a peer that has this chunk
-        let selectedPeer = null;
-        for (const peer of availablePeers) {
-          const bm = haveBitmapByPeer.get(peer.pid);
-          if (bm && bm[idx] === 1) {
-            selectedPeer = peer;
-            break;
-          }
-        }
+        // Use round-robin to select peer for this chunk
+        const selectedPeer = choosePeerForChunk(availablePeers, idx);
         
-        // Fallback: try any peer (they might have it but bitmap not updated)
-        if (!selectedPeer && availablePeers.length > 0) {
-          selectedPeer = availablePeers[0];
-        }
-
-        if (selectedPeer) {
-          const msg = { t: 'REQUEST', index: idx };
-          try {
-            selectedPeer.ch.send(JSON.stringify(msg));
-            inflight++;
-            issued++;
-          } catch (_) {}
+        if (selectedPeer && sendRequest(selectedPeer.pid, idx)) {
+          issued++;
         }
       }
     }
