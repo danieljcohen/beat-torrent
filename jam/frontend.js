@@ -474,6 +474,7 @@
             for (const [pid, ch] of dcByPeer.entries()) {
               if (ch && ch.readyState === 'open') {
                 try { ch.send(JSON.stringify(meta)); } catch (_) {}
+                try { sendHaveBitmap(ch); } catch (_) {}
               }
             }
             appendLog('ℹ', 'Sent TRACK_META to open peers');
@@ -498,6 +499,51 @@
     let nextToRequest = 0;
     let recvNumChunks = 0;
     let recvChunkSize = 0;
+    // Per-peer HAVE bitmap knowledge and announce throttle
+    const haveBitmapByPeer = new Map(); // peerId -> Array<0|1>
+    let bitmapAnnounceTimer = null;
+
+    function currentNumChunks(){
+      if (pbHost && Number.isFinite(pbHost.numChunks)) return pbHost.numChunks|0;
+      if (pbRecv && Number.isFinite(pbRecv.numChunks)) return pbRecv.numChunks|0;
+      return 0;
+    }
+
+    function buildLocalBitmap(){
+      const n = currentNumChunks();
+      if (n <= 0) return [];
+      const src = pbHost ? pbHost.have : (pbRecv ? pbRecv.have : null);
+      if (!src || !Array.isArray(src)) return new Array(n).fill(0);
+      const out = new Array(n);
+      for (let i=0;i<n;i++){ out[i] = src[i] ? 1 : 0; }
+      return out;
+    }
+
+    function sendHaveBitmap(channel){
+      if (!channel || channel.readyState !== 'open') return;
+      const n = currentNumChunks();
+      if (!Number.isFinite(n) || n <= 0) return;
+      const bitmap = buildLocalBitmap();
+      try { channel.send(JSON.stringify({ t: 'HAVE_BITMAP', bitmap })); } catch (_) {}
+    }
+
+    function broadcastHaveBitmap(){
+      const n = currentNumChunks();
+      if (!Number.isFinite(n) || n <= 0) return;
+      for (const [, ch] of dcByPeer.entries()){
+        if (ch && ch.readyState === 'open') {
+          sendHaveBitmap(ch);
+        }
+      }
+    }
+
+    function scheduleBitmapAnnounce(delayMs = 300){
+      if (bitmapAnnounceTimer) return;
+      bitmapAnnounceTimer = setTimeout(() => {
+        bitmapAnnounceTimer = null;
+        try { broadcastHaveBitmap(); } catch (_) {}
+      }, Math.max(0, delayMs|0));
+    }
 
     function resetP2P(){
       try { for (const ch of dcByPeer.values()) { try { ch.close(); } catch (_) {} } } catch (_) {}
@@ -570,6 +616,8 @@
         if (pbHost && channel.readyState === 'open') {
           const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
           channel.send(JSON.stringify(meta));
+          // Share initial HAVE bitmap
+          sendHaveBitmap(channel);
         }
       };
       channel.onclose = () => appendLog('ℹ', `datachannel close (${peerId})`);
@@ -607,6 +655,8 @@
           startAppendLoop();
           // Kick off requests
           scheduleRequests();
+          // After knowing numChunks, share our HAVE bitmap
+          sendHaveBitmap(channel);
         } else if (msg.t === 'REQUEST') {
           // Host path: send requested chunk back
           const idx = msg.index|0;
@@ -621,6 +671,16 @@
             channel.send(payload);
           } catch (e) {
             appendLog('!', `send DATA failed idx=${idx}`);
+          }
+        } else if (msg.t === 'HAVE_BITMAP') {
+          // Record peer's HAVE bitmap
+          const arr = Array.isArray(msg.bitmap) ? msg.bitmap : [];
+          const n = currentNumChunks();
+          if (n > 0 && arr.length === n) {
+            const normalized = new Array(n);
+            for (let i=0;i<n;i++){ normalized[i] = arr[i] ? 1 : 0; }
+            haveBitmapByPeer.set(peerId, normalized);
+            appendLog('ℹ', `HAVE_BITMAP from ${peerId} received`);
           }
         } else if (msg.t === 'DATA') {
           // Expect binary next
@@ -650,6 +710,8 @@
       inflight = Math.max(0, inflight - 1);
       if (haveCount) haveCount.value = String(pbRecv.haveCount);
       scheduleRequests();
+      // Throttle broadcast of updated HAVE bitmap
+      scheduleBitmapAnnounce(400);
     }
 
     function getUpstreamDc(){
