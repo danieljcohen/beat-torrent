@@ -82,7 +82,7 @@
           if (msg.type === 'STATE') {
             const p = msg.payload || {};
             stateLine.textContent = `STATE: track=${p.track_id ?? '(none)'} status=${p.status} offset=${p.offset_sec} ts=${p.timestamp}`;
-            // Host broadcasts control; all clients honor it
+            // Host broadcasts control, all clients honor it
             playAuthorized = (p.status === 'PLAY');
             if (p.status === 'PLAY') {
               manualPaused = false;
@@ -234,7 +234,6 @@
 
     // Swarm rendering
     const swarmTable = document.querySelector('#swarmTable tbody');
-    const logPeersBtn = document.getElementById('logPeersBtn');
     let lastPeers = [];
     function renderSwarm(peers){
       lastPeers = peers || [];
@@ -248,16 +247,8 @@
       });
     }
 
-    if (logPeersBtn) {
-      logPeersBtn.onclick = () => {
-        try {
-          console.log('Current peers:', lastPeers);
-        } catch (_) {}
-        appendLog('ℹ', {peers: lastPeers});
-      };
-    }
 
-    // Phase 1 & 2: In-browser RAM buffer with contiguous guard
+    // In-browser RAM buffer with contiguous guard
     class PeerBuffer {
       constructor(numChunks, chunkSize){
         this.numChunks = numChunks|0;
@@ -300,60 +291,8 @@
       }
     }
 
-    function uint8eq(a, b){
-      if (a.length !== b.length) return false;
-      for (let i=0;i<a.length;i++){ if (a[i] !== b[i]) return false; }
-      return true;
-    }
 
-    function runPhase1And2Tests(){
-      try {
-        const nChunks = parseInt(totalChunks.value || '0', 10);
-        const cSize = parseInt(chunkSize.value || '0', 10);
-        if (!Number.isFinite(nChunks) || !Number.isFinite(cSize) || nChunks <= 0 || cSize <= 0) {
-          appendLog('!', 'Invalid Total Chunks / Chunk Size');
-          return;
-        }
-        const pb = new PeerBuffer(nChunks, cSize);
-        const total = nChunks * cSize;
-        const source = new Uint8Array(total);
-        for (let i=0;i<total;i++){ source[i] = i & 0xff; }
-
-        // Phase 1: seed all, then read 0..N and compare
-        for (let idx=0; idx<nChunks; idx++){
-          const start = idx * cSize;
-          pb.setChunk(idx, source.slice(start, start + cSize));
-        }
-        const N = Math.min(total - Math.floor(cSize/2), 10 * cSize + 123);
-        const got = pb.readRange(0, N);
-        const exp = source.slice(0, N);
-        const ok1 = uint8eq(got, exp);
-        appendLog(ok1 ? '✓' : '✗', `Phase 1 readRange(0, ${N}) ${ok1 ? 'PASS' : 'FAIL'}`);
-
-        // Phase 2: create a gap at chunk 5, ensure clamp at end of chunk 4
-        const pb2 = new PeerBuffer(nChunks, cSize);
-        // seed chunks 0..4 and 6.. up to some
-        for (let idx=0; idx<nChunks; idx++){
-          if (idx === 5) continue;
-          const start = idx * cSize;
-          pb2.setChunk(idx, source.slice(start, start + cSize));
-        }
-        const want = 7 * cSize; // would span across the gap
-        const got2 = pb2.readRange(0, want);
-        const expectedLen = Math.min(5 * cSize, want);
-        const ok2 = (got2.length === expectedLen);
-        appendLog(ok2 ? '✓' : '✗', `Phase 2 contiguous clamp len=${got2.length} expected=${expectedLen} ${ok2 ? 'PASS' : 'FAIL'}`);
-        appendLog('ℹ', {largestContiguousByteEnd: pb2.getLargestContiguousEnd()});
-      } catch (e) {
-        appendLog('!', `Test error: ${e && e.message ? e.message : e}`);
-      }
-    }
-
-    if (runPhase1Btn) {
-      runPhase1Btn.onclick = runPhase1And2Tests;
-    }
-
-    // Phase 3+: Minimal MSE player fed from active PeerBuffer (host or viewer)
+    // Minimal MSE player fed from active PeerBuffer (host or viewer)
     let pbActive = null;      // currently playing buffer
     let pbHost = null;        // host's buffer (when file loaded)
     let pbRecv = null;        // viewer's download buffer
@@ -547,7 +486,7 @@
       };
     }
 
-    // ---- Phase 9: WebRTC DataChannel P2P for chunk transfer ----
+    // WebRTC DataChannel P2P for chunk transfer
     const rtcConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
     // Per-peer connections/channels
     const pcByPeer = new Map();
@@ -700,7 +639,7 @@
         appendLog('!', `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`);
         return;
       }
-      // Ensure chunk is chunkSize; pad if needed
+      // Ensure chunk is chunkSize, pad if needed
       let payload = bytes;
       if (bytes.length !== pbRecv.chunkSize) {
         const padded = new Uint8Array(pbRecv.chunkSize);
