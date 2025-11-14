@@ -794,15 +794,114 @@
       return ch;
     }
 
+    // Smart chunk scheduler: 3-phase strategy
     function scheduleRequests(){
-      const dc = getUpstreamDc();
-      if (!dc || !pbRecv) return;
-      while (inflight < inflightMax && nextToRequest < pbRecv.numChunks) {
-        if (!pbRecv.have[nextToRequest]) {
-          const msg = { t: 'REQUEST', index: nextToRequest };
-          try { dc.send(JSON.stringify(msg)); inflight++; } catch (_) {}
+      if (!pbRecv) return;
+      const numChunks = pbRecv.numChunks;
+      if (numChunks <= 0) return;
+
+      // Gather available peers
+      const availablePeers = [];
+      for (const [pid, ch] of dcByPeer.entries()) {
+        if (ch && ch.readyState === 'open') {
+          availablePeers.push({ pid, ch });
         }
-        nextToRequest++;
+      }
+      if (availablePeers.length === 0) return;
+
+      // Determine current playback position (in chunks)
+      const currentTimeSec = (audioEl && audioEl.currentTime) || 0;
+      const bytesPerSec = fileSizeBytes > 0 && audioEl && audioEl.duration > 0 ? fileSizeBytes / audioEl.duration : 0;
+      const playheadByte = bytesPerSec > 0 ? currentTimeSec * bytesPerSec : 0;
+      const playheadChunk = pbRecv.chunkSize > 0 ? Math.floor(playheadByte / pbRecv.chunkSize) : 0;
+
+      // Phase detection
+      const startThresholdBytes = Math.max(0, Math.floor((parseFloat(startThresholdKB && startThresholdKB.value ? startThresholdKB.value : '256') || 256) * 1024));
+      const startupChunkThreshold = pbRecv.chunkSize > 0 ? Math.ceil(startThresholdBytes / pbRecv.chunkSize) : 10;
+      const contiguousEnd = pbRecv.contiguousChunkEnd || 0;
+      const endgameThreshold = Math.floor(numChunks * 0.85); // last 15%
+      const safeZoneChunks = 20; // ~20 chunks ahead of playhead
+
+      let phase = 'startup';
+      if (contiguousEnd >= startupChunkThreshold) {
+        if (pbRecv.haveCount >= endgameThreshold) {
+          phase = 'endgame';
+        } else {
+          phase = 'stable';
+        }
+      }
+
+      // Build candidate list based on phase
+      const candidates = [];
+
+      if (phase === 'startup') {
+        // PHASE 1: Sequential from 0 until startupChunkThreshold
+        for (let i = 0; i < Math.min(startupChunkThreshold, numChunks); i++) {
+          if (!pbRecv.have[i]) {
+            candidates.push({ index: i, priority: 1000000 - i }); // high priority, sequential
+          }
+        }
+      } else if (phase === 'stable') {
+        // PHASE 2: Split-zone strategy
+        const playbackZoneEnd = Math.min(playheadChunk + safeZoneChunks, numChunks);
+        
+        // Playback zone: sequential near playhead
+        for (let i = playheadChunk; i < playbackZoneEnd; i++) {
+          if (i >= 0 && i < numChunks && !pbRecv.have[i]) {
+            candidates.push({ index: i, priority: 2000000 - i }); // highest priority
+          }
+        }
+
+        // Swarm zone: rarest-first beyond safe zone
+        for (let i = playbackZoneEnd; i < numChunks; i++) {
+          if (!pbRecv.have[i]) {
+            const rarity = peersByChunk[i] ? peersByChunk[i].size : 0;
+            // Lower rarity = higher priority (rarest first)
+            const priority = 1000000 - (rarity * 10000) + (Math.random() * 100);
+            candidates.push({ index: i, priority });
+          }
+        }
+      } else if (phase === 'endgame') {
+        // PHASE 3: Sequential tail, fill any gaps
+        for (let i = 0; i < numChunks; i++) {
+          if (!pbRecv.have[i]) {
+            candidates.push({ index: i, priority: 3000000 - i });
+          }
+        }
+      }
+
+      // Sort by priority (highest first)
+      candidates.sort((a, b) => b.priority - a.priority);
+
+      // Issue requests up to inflightMax
+      let issued = 0;
+      for (const cand of candidates) {
+        if (inflight >= inflightMax) break;
+        const idx = cand.index;
+        
+        // Find a peer that has this chunk
+        let selectedPeer = null;
+        for (const peer of availablePeers) {
+          const bm = haveBitmapByPeer.get(peer.pid);
+          if (bm && bm[idx] === 1) {
+            selectedPeer = peer;
+            break;
+          }
+        }
+        
+        // Fallback: try any peer (they might have it but bitmap not updated)
+        if (!selectedPeer && availablePeers.length > 0) {
+          selectedPeer = availablePeers[0];
+        }
+
+        if (selectedPeer) {
+          const msg = { t: 'REQUEST', index: idx };
+          try {
+            selectedPeer.ch.send(JSON.stringify(msg));
+            inflight++;
+            issued++;
+          } catch (_) {}
+        }
       }
     }
 
