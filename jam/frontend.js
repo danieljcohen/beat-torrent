@@ -468,6 +468,14 @@
           pbActive = pbHost;
           if (haveCount) haveCount.value = String(pbActive.haveCount);
           appendLog('ℹ', `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
+          // Initialize availability tables for host
+          initPeersByChunk(nChunks);
+          // Initialize blank bitmaps for all known peers
+          for (const pid of dcByPeer.keys()) {
+            if (!haveBitmapByPeer.has(pid)) {
+              haveBitmapByPeer.set(pid, new Array(nChunks).fill(0));
+            }
+          }
           // If a datachannel is already open, push TRACK_META to viewer(s)
           try {
             const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
@@ -502,6 +510,8 @@
     // Per-peer HAVE bitmap knowledge and announce throttle
     const haveBitmapByPeer = new Map(); // peerId -> Array<0|1>
     let bitmapAnnounceTimer = null;
+    // Availability tables: chunk-to-peers mapping
+    let peersByChunk = []; // Array<Set<peerId>>
 
     function currentNumChunks(){
       if (pbHost && Number.isFinite(pbHost.numChunks)) return pbHost.numChunks|0;
@@ -545,6 +555,37 @@
       }, Math.max(0, delayMs|0));
     }
 
+    function initPeersByChunk(numChunks){
+      peersByChunk = new Array(numChunks|0);
+      for (let i=0; i<peersByChunk.length; i++){
+        peersByChunk[i] = new Set();
+      }
+    }
+
+    function updatePeerAvailability(peerId, bitmap){
+      if (!Array.isArray(bitmap) || bitmap.length !== peersByChunk.length) return;
+      // Remove this peer from all chunks first
+      for (let i=0; i<peersByChunk.length; i++){
+        peersByChunk[i].delete(peerId);
+      }
+      // Add peer to chunks they have
+      for (let i=0; i<bitmap.length; i++){
+        if (bitmap[i]) {
+          peersByChunk[i].add(peerId);
+        }
+      }
+    }
+
+    function markPeerHasChunk(peerId, chunkIndex){
+      if (chunkIndex < 0 || chunkIndex >= peersByChunk.length) return;
+      peersByChunk[chunkIndex].add(peerId);
+      // Also update bitmap if exists
+      const bm = haveBitmapByPeer.get(peerId);
+      if (bm && chunkIndex < bm.length) {
+        bm[chunkIndex] = 1;
+      }
+    }
+
     function resetP2P(){
       try { for (const ch of dcByPeer.values()) { try { ch.close(); } catch (_) {} } } catch (_) {}
       try { for (const p of pcByPeer.values()) { try { p.close(); } catch (_) {} } } catch (_) {}
@@ -554,6 +595,8 @@
       pendingDataHeader = null;
       inflight = 0; nextToRequest = 0;
       recvNumChunks = 0; recvChunkSize = 0;
+      haveBitmapByPeer.clear();
+      peersByChunk = [];
     }
 
     function sendSignal(to, blob){
@@ -585,6 +628,11 @@
           pcByPeer.delete(toPeerId);
           if (primaryUpstreamPeerId === toPeerId) {
             primaryUpstreamPeerId = null;
+          }
+          // Clean up peer availability
+          haveBitmapByPeer.delete(toPeerId);
+          for (let i=0; i<peersByChunk.length; i++){
+            peersByChunk[i].delete(toPeerId);
           }
         }
       };
@@ -651,6 +699,14 @@
           fileSizeBytes = total;
           if (totalChunks) totalChunks.value = String(recvNumChunks);
           if (chunkSize) chunkSize.value = String(recvChunkSize);
+          // Initialize availability tables
+          initPeersByChunk(recvNumChunks);
+          // Initialize blank bitmaps for all known peers
+          for (const pid of dcByPeer.keys()) {
+            if (!haveBitmapByPeer.has(pid)) {
+              haveBitmapByPeer.set(pid, new Array(recvNumChunks).fill(0));
+            }
+          }
           initMediaSource();
           startAppendLoop();
           // Kick off requests
@@ -680,7 +736,17 @@
             const normalized = new Array(n);
             for (let i=0;i<n;i++){ normalized[i] = arr[i] ? 1 : 0; }
             haveBitmapByPeer.set(peerId, normalized);
+            // Update availability table
+            updatePeerAvailability(peerId, normalized);
             appendLog('ℹ', `HAVE_BITMAP from ${peerId} received`);
+          }
+        } else if (msg.t === 'HAVE_DELTA_DC') {
+          // Single chunk update from peer
+          const idx = msg.index|0;
+          const n = currentNumChunks();
+          if (idx >= 0 && idx < n) {
+            markPeerHasChunk(peerId, idx);
+            appendLog('ℹ', `HAVE_DELTA_DC from ${peerId} chunk=${idx}`);
           }
         } else if (msg.t === 'DATA') {
           // Expect binary next
