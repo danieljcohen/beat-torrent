@@ -1,0 +1,12 @@
+{
+    "name": "beat-torrent",
+    "version": "1.0.0",
+    "private": true,
+    "scripts": {
+        "format": "prettier --write \"**/*.{js,jsx,ts,tsx,html,css,json,md}\"",
+        "format:check": "prettier --check \"**/*.{js,jsx,ts,tsx,html,css,json,md}\""
+    },
+    "devDependencies": {
+        "prettier": "^3.2.5"
+    }
+}

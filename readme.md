@@ -67,6 +67,12 @@ python peer.py \
   --listen-port 9004 --num-chunks 120 --chunk-size 4096 \
   --connect [IP_ADDRESS]:9003 (use ur own IP)
 
+## Formatting
+
+1. Install the JavaScript tooling once: `npm install`
+2. Run `npm run format` (or `npm run format:check`) to apply Prettier.
+
+Prettier automatically reads `.editorconfig`, so the whitespace rules defined there (LF line endings, trim trailing whitespace, 4-space Python, 2-space HTML/JS, etc.) are enforced whenever you run the formatter or rely on editor integrations.
 
 
 
