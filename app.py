@@ -2,42 +2,138 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
-from typing import Optional, Set, Dict, Any
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
 
-@app.get("/health")
-def root():
-    return {"status": "ok"}
-
-participants: Set[WebSocket] = set()
-host_id: Optional[int] = None
-peer_id_by_ws: dict[WebSocket, str] = {}
-ws_by_peer_id: dict[str, WebSocket] = {} #support for multiple rooms (tho not yet implemented)
-
-# shared state
-state = {
-    "track_id": None,
-    "status": "PAUSE",
-    "offset_sec": 0.0,
-    "timestamp": time.time(),
-}
-
-# swarm tracker (single-track room):
-# room -> peer_id -> {ip, port, last_seen, have_count, total_chunks?, chunk_size?}
-swarms: Dict[str, Dict[str, Dict[str, Any]]] = {}
 PEERS_INTERVAL_SEC = 15
 STALE_PEER_SEC = 60
 
 
-async def broadcast(message_json: str):
-    """Best-effort broadcast to all participants."""
+@dataclass
+class PlaybackState:
+    track_id: Optional[str] = None
+    status: str = "PAUSE"
+    offset_sec: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+
+    def to_payload(self) -> Dict[str, Any]:
+        return {
+            "track_id": self.track_id,
+            "status": self.status,
+            "offset_sec": self.offset_sec,
+            "timestamp": self.timestamp,
+        }
+
+    def reset_controls(self) -> None:
+        self.status = "PAUSE"
+        self.offset_sec = 0.0
+        self.timestamp = time.time()
+
+    def apply(self, *, track_id: Any, status: str, offset_sec: float, timestamp: float) -> None:
+        self.track_id = track_id
+        self.status = status
+        self.offset_sec = offset_sec
+        self.timestamp = timestamp
+
+
+@dataclass
+class SwarmPeer:
+    peer_id: str
+    ip: str
+    port: Optional[int] = None
+    have_count: int = 0
+    total_chunks: Optional[int] = None
+    chunk_size: Optional[int] = None
+    last_seen: float = field(default_factory=time.time)
+
+    def update_from_announce(
+        self,
+        *,
+        port: int,
+        have_count: int,
+        total_chunks: Optional[int],
+        chunk_size: Optional[int],
+    ) -> None:
+        self.port = port
+        self.have_count = have_count
+        self.last_seen = time.time()
+        if isinstance(total_chunks, int):
+            self.total_chunks = total_chunks
+        if isinstance(chunk_size, int):
+            self.chunk_size = chunk_size
+
+    def bump_have_count(self, delta: int) -> None:
+        if delta > 0:
+            self.have_count += delta
+        self.last_seen = time.time()
+
+    def as_peer_payload(self) -> Dict[str, Any]:
+        return {
+            "peer_id": self.peer_id,
+            "ip": self.ip,
+            "port": self.port,
+            "have_count": int(self.have_count or 0),
+        }
+
+
+@dataclass
+class ConnectionContext:
+    websocket: WebSocket
+    peer_id: str
+    role: str
+    display_name: str
+
+    @property
+    def is_host(self) -> bool:
+        return self.role == "host"
+
+    def is_active_host(self) -> bool:
+        return self.is_host and host_id == id(self.websocket)
+
+
+participants: Set[WebSocket] = set()
+host_id: Optional[int] = None
+peer_id_by_ws: dict[WebSocket, str] = {}
+ws_by_peer_id: dict[str, WebSocket] = {}
+playback_state = PlaybackState()
+swarms: Dict[str, Dict[str, SwarmPeer]] = {}  # room -> peer_id -> SwarmPeer
+
+
+class HelloValidationError(Exception):
+    def __init__(self, message: str, *, raw_payload: str | None = None) -> None:
+        super().__init__(message)
+        self.raw_payload = raw_payload
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if self.raw_payload is None:
+            return base
+        return f"{base} (payload={self.raw_payload})"
+
+
+def generate_peer_id() -> str:
+    return secrets.token_hex(3)
+
+
+async def send_json(ws: WebSocket, payload: Dict[str, Any]) -> None:
+    await ws.send_text(json.dumps(payload))
+
+
+async def send_error(ws: WebSocket, message: str) -> None:
+    await send_json(ws, {"type": "ERROR", "message": message})
+
+
+async def broadcast(payload: Dict[str, Any]) -> None:
     if not participants:
         return
+    message_json = json.dumps(payload)
     disconnected = []
     for ws in participants:
         try:
@@ -47,262 +143,244 @@ async def broadcast(message_json: str):
     for ws in disconnected:
         participants.discard(ws)
 
-def generate_peer_id() -> str:
-    # Simple short (unique) peer id
-    return f"p{int(time.time() * 1000) % 1000000:x}"
+
+def get_peer_ip(websocket: WebSocket) -> str:
+    return getattr(websocket.client, "host", None) or "0.0.0.0"
+
+
+def get_swarm(room: str) -> Dict[str, SwarmPeer]:
+    return swarms.setdefault(room, {})
+
+
+def peers_payload_for_room(room: str, *, exclude_peer: Optional[str] = None) -> list[Dict[str, Any]]:
+    swarm = swarms.get(room, {})
+    peers: list[Dict[str, Any]] = []
+    for pid, meta in swarm.items():
+        if exclude_peer and pid == exclude_peer:
+            continue
+        if meta.port:
+            peers.append(meta.as_peer_payload())
+    return peers
+
+
+async def push_peers_to_room(room: str) -> None:
+    swarm = swarms.get(room)
+    if not swarm:
+        return
+    full_list = peers_payload_for_room(room)
+    for pid in list(swarm.keys()):
+        ws = ws_by_peer_id.get(pid)
+        if not ws:
+            continue
+        peers = [p for p in full_list if p["peer_id"] != pid]
+        out = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
+        try:
+            await send_json(ws, out)
+        except Exception:
+            pass
+
+
+async def receive_hello(websocket: WebSocket) -> tuple[str, str]:
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=20.0)
+    except asyncio.TimeoutError as exc:
+        raise HelloValidationError("HELLO timeout") from exc
+
+    try:
+        hello = json.loads(raw)
+    except Exception as exc:
+        raise HelloValidationError("Invalid HELLO") from exc
+
+    if hello.get("type") != "HELLO":
+        raise HelloValidationError("Expected HELLO")
+
+    role = hello.get("role")
+    if role not in ("host", "viewer"):
+        raise HelloValidationError("Invalid role")
+
+    display_name = hello.get("display_name") or "anon"
+    return role, display_name
+
+
+async def handle_play_pause(ctx: ConnectionContext, msg: Dict[str, Any]) -> None:
+    if not ctx.is_active_host():
+        await send_error(ctx.websocket, "Only host can control")
+        return
+    playback_state.apply(
+        track_id=msg.get("track_id"),
+        status=msg.get("type"),
+        offset_sec=msg.get("offset_sec", 0.0),
+        timestamp=msg.get("timestamp", time.time()),
+    )
+    await broadcast({"type": "STATE", "payload": playback_state.to_payload()})
+
+
+async def handle_signal(ctx: ConnectionContext, msg: Dict[str, Any]) -> None:
+    to_peer = msg.get("to")
+    blob = msg.get("blob")
+    if not to_peer or blob is None:
+        await send_error(ctx.websocket, "SIGNAL missing fields")
+        return
+    dst_ws = ws_by_peer_id.get(to_peer)
+    if not dst_ws:
+        await send_error(ctx.websocket, f"Peer {to_peer} not found")
+        return
+    routed = {"type": "SIGNAL", "from": ctx.peer_id, "blob": blob}
+    try:
+        await send_json(dst_ws, routed)
+        print(f"SIGNAL route {ctx.peer_id} -> {to_peer}")
+    except Exception:
+        pass
+
+
+def upsert_swarm_peer(room: str, ctx: ConnectionContext) -> SwarmPeer:
+    swarm = get_swarm(room)
+    peer = swarm.get(ctx.peer_id)
+    if peer is None:
+        peer = SwarmPeer(peer_id=ctx.peer_id, ip=get_peer_ip(ctx.websocket))
+        swarm[ctx.peer_id] = peer
+    else:
+        peer.ip = get_peer_ip(ctx.websocket) or peer.ip
+    return peer
+
+
+async def handle_announce(ctx: ConnectionContext, msg: Dict[str, Any]) -> None:
+    room = msg.get("room")
+    if not room:
+        await send_error(ctx.websocket, "ANNOUNCE missing room")
+        return
+    port = msg.get("port")
+    if not isinstance(port, int):
+        await send_error(ctx.websocket, "ANNOUNCE missing/invalid port")
+        return
+    total_chunks = msg.get("total_chunks")
+    chunk_size = msg.get("chunk_size")
+    have_count = int(msg.get("have_count") or 0)
+
+    entry = upsert_swarm_peer(room, ctx)
+    entry.update_from_announce(
+        port=port,
+        have_count=have_count,
+        total_chunks=total_chunks,
+        chunk_size=chunk_size,
+    )
+    print(f"ANNOUNCE room={room} peer={ctx.peer_id} ip={entry.ip} port={port} have_count={have_count}")
+
+    await send_json(
+        ctx.websocket,
+        {"type": "PEERS", "room": room, "peers": peers_payload_for_room(room, exclude_peer=ctx.peer_id), "interval_sec": PEERS_INTERVAL_SEC},
+    )
+    await push_peers_to_room(room)
+
+
+async def handle_have_delta(ctx: ConnectionContext, msg: Dict[str, Any]) -> None:
+    room = msg.get("room")
+    if not room:
+        await send_error(ctx.websocket, "HAVE_DELTA missing room")
+        return
+    indices = msg.get("indices") or []
+    entry = upsert_swarm_peer(room, ctx)
+    entry.bump_have_count(len(indices))
+    print(f"HAVE_DELTA room={room} peer={ctx.peer_id} +{len(indices)} have_count={entry.have_count}")
+
+    await send_json(
+        ctx.websocket,
+        {"type": "PEERS", "room": room, "peers": peers_payload_for_room(room, exclude_peer=ctx.peer_id), "interval_sec": PEERS_INTERVAL_SEC},
+    )
+    await push_peers_to_room(room)
+
+
+def drop_peer_from_swarms(peer_id: str) -> None:
+    for room, swarm in list(swarms.items()):
+        if peer_id in swarm:
+            swarm.pop(peer_id, None)
+        if not swarm:
+            swarms.pop(room, None)
 
 
 @app.websocket("/ws/jam1")
 async def ws_jam1(websocket: WebSocket):
     await websocket.accept()
+    ctx: Optional[ConnectionContext] = None
 
-    # Expect HELLO within 20 seconds
     try:
-        hello_raw = await asyncio.wait_for(websocket.receive_text(), timeout=20.0)
-    except asyncio.TimeoutError:
-        await websocket.close(code=1008, reason="HELLO timeout")
+        role, display_name = await receive_hello(websocket)
+    except HelloValidationError as exc:
+        await websocket.close(code=1008, reason=str(exc))
         return
 
-    # Parse HELLO
-    try:
-        hello = json.loads(hello_raw)
-        if hello.get("type") != "HELLO":
-            await websocket.close(code=1008, reason="Expected HELLO")
-            return
-        role = hello.get("role")
-        display_name = hello.get("display_name") or "anon"
-        if role not in ("host", "viewer"):
-            await websocket.close(code=1008, reason="Invalid role")
-            return
-    except Exception:
-        await websocket.close(code=1008, reason="Invalid HELLO")
-        return
-
-    # Host assignment (only one host allowed)
     global host_id
-    is_host = role == "host"
-    if is_host:
+    if role == "host":
         if host_id is not None:
             await websocket.close(code=1008, reason="Host already assigned")
             return
         host_id = id(websocket)
-        # Reset state to PAUSE when new host connects
-        state["status"] = "PAUSE"
-        state["offset_sec"] = 0.0
-        state["timestamp"] = time.time()
+        playback_state.reset_controls()
 
-    # Add participant
     participants.add(websocket)
+    peer_id = generate_peer_id()
+    peer_id_by_ws[websocket] = peer_id
+    ws_by_peer_id[peer_id] = websocket
+    ctx = ConnectionContext(websocket=websocket, peer_id=peer_id, role=role, display_name=display_name)
 
-    # Assign peer id and send to this socket
-    my_peer_id = generate_peer_id()
-    peer_id_by_ws[websocket] = my_peer_id
-    ws_by_peer_id[my_peer_id] = websocket
-    await websocket.send_text(json.dumps({"type": "PEER", "peer_id": my_peer_id}))
-
-    # Send initial STATE immediately
-    await websocket.send_text(json.dumps({"type": "STATE", "payload": state}))
-
-    async def push_peers_to_room(room: str):
-        swarm = swarms.get(room, {})
-        # Build full list once
-        full = []
-        for pid, meta in swarm.items():
-            if meta.get("port"):
-                full.append({
-                    "peer_id": pid,
-                    "ip": meta.get("ip"),
-                    "port": meta.get("port"),
-                    "have_count": int(meta.get("have_count") or 0),
-                })
-        # Push to each peer (exclude receiver from peers list)
-        for pid in list(swarm.keys()):
-            ws = ws_by_peer_id.get(pid)
-            if not ws:
-                continue
-            peers = [p for p in full if p["peer_id"] != pid]
-            out = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
-            try:
-                await ws.send_text(json.dumps(out))
-            except Exception:
-                pass
+    await send_json(websocket, {"type": "PEER", "peer_id": peer_id})
+    await send_json(websocket, {"type": "STATE", "payload": playback_state.to_payload()})
 
     try:
         while True:
             msg_raw = await websocket.receive_text()
             try:
                 msg = json.loads(msg_raw)
-            except Exception as e:
-                await websocket.send_text(json.dumps({"type": "ERROR", "message": f"Invalid JSON: {e}"}))
+            except Exception as exc:
+                await send_error(websocket, f"Invalid JSON: {exc}")
                 continue
 
             msg_type = msg.get("type")
-
             if msg_type in ("PLAY", "PAUSE"):
-                # Only host can control
-                if not is_host or id(websocket) != host_id:
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "Only host can control"}))
-                    continue
-
-                # Update state
-                state["track_id"] = msg["track_id"]
-                state["status"] = msg_type
-                state["offset_sec"] = msg["offset_sec"]
-                state["timestamp"] = msg["timestamp"]
-
-                # Broadcast STATE to all (including sender)
-                out = json.dumps({"type": "STATE", "payload": state})
-                await broadcast(out)
+                await handle_play_pause(ctx, msg)
             elif msg_type == "SIGNAL":
-                # Letting peers send blob to eachoter --> later replace with connection offer between peers (bittorrent style peer discovery)
-                to_peer = msg["to"]
-                blob = msg["blob"]
-                dst_ws = ws_by_peer_id.get(to_peer)
-                if dst_ws:
-                    from_peer = peer_id_by_ws.get(websocket, "unknown")
-                    routed = json.dumps({"type": "SIGNAL", "from": from_peer, "blob": blob})
-                    try:
-                        await dst_ws.send_text(routed)
-                        print(f"SIGNAL route {from_peer} -> {to_peer}")
-                    except Exception:
-                        pass
+                await handle_signal(ctx, msg)
             elif msg_type == "ANNOUNCE":
-                caller_id = peer_id_by_ws.get(websocket, "unknown")
-                ip = getattr(websocket.client, "host", None) or "0.0.0.0"
-                now = time.time()
-                room = msg.get("room")
-                if not room:
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "ANNOUNCE missing room"}))
-                    continue
-                port = msg.get("port")
-                total_chunks = msg.get("total_chunks")
-                chunk_size = msg.get("chunk_size")
-                have_count = int(msg.get("have_count") or 0)
-                if not isinstance(port, int):
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "ANNOUNCE missing/invalid port"}))
-                    continue
-                swarm = swarms.setdefault(room, {})
-                entry = swarm.get(caller_id) or {}
-                entry["ip"] = ip
-                entry["port"] = port
-                entry["last_seen"] = now
-                entry["have_count"] = have_count
-                if isinstance(total_chunks, int):
-                    entry["total_chunks"] = total_chunks
-                if isinstance(chunk_size, int):
-                    entry["chunk_size"] = chunk_size
-                swarm[caller_id] = entry
-                try:
-                    print(f"ANNOUNCE room={room} peer={caller_id} ip={ip} port={port} have_count={have_count}")
-                except Exception:
-                    pass
-                # Build peers list excluding caller, include have_count
-                peers = []
-                for pid, meta in swarm.items():
-                    if pid == caller_id:
-                        continue
-                    if "ip" in meta and "port" in meta:
-                        peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
-                resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
-                await websocket.send_text(json.dumps(resp))
-                # Broadcast updated peers to everyone in the room
-                await push_peers_to_room(room)
+                await handle_announce(ctx, msg)
             elif msg_type == "HAVE_DELTA":
-                caller_id = peer_id_by_ws.get(websocket, "unknown")
-                now = time.time()
-                room = msg.get("room")
-                indices = msg.get("indices") or []
-                if not room:
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "HAVE_DELTA missing room"}))
-                    continue
-                swarm = swarms.setdefault(room, {})
-                entry = swarm.get(caller_id) or {"ip": getattr(websocket.client, "host", None) or "0.0.0.0", "port": None}
-                entry["last_seen"] = now
-                if indices:
-                    prev = int(entry.get("have_count") or 0)
-                    entry["have_count"] = prev + len(indices)
-                swarm[caller_id] = entry
-                try:
-                    print(f"HAVE_DELTA room={room} peer={caller_id} +{len(indices)} have_count={int(entry.get('have_count') or 0)}")
-                except Exception:
-                    pass
-                # Reply with current peers including have_count
-                peers = []
-                for pid, meta in swarm.items():
-                    if pid == caller_id:
-                        continue
-                    if "ip" in meta and "port" in meta and meta["port"]:
-                        peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
-                resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
-                await websocket.send_text(json.dumps(resp))
-                # Broadcast updated peers to everyone in the room
-                await push_peers_to_room(room)
+                await handle_have_delta(ctx, msg)
             else:
-                await websocket.send_text(json.dumps({"type": "ERROR", "message": f"Unknown type: {msg_type}"}))
-                
+                await send_error(websocket, f"Unknown type: {msg_type}")
     except WebSocketDisconnect:
         pass
     finally:
-        # Cleanup on disconnect
-        participants.discard(websocket)
-        pid = peer_id_by_ws.pop(websocket, None)
-        if pid:
-            ws_by_peer_id.pop(pid, None)
-            # Remove from any swarm
-            for track_id, swarm in list(swarms.items()):
-                if pid in swarm:
-                    swarm.pop(pid, None)
-                if not swarm:
-                    swarms.pop(track_id, None)
-        if is_host and host_id == id(websocket):
-            # Clear host if it was this socket and reset state to PAUSE
+        if not ctx:
+            return
+        participants.discard(ctx.websocket)
+        peer_id_by_ws.pop(ctx.websocket, None)
+        ws_by_peer_id.pop(ctx.peer_id, None)
+        drop_peer_from_swarms(ctx.peer_id)
+        if ctx.is_active_host():
             host_id = None
-            state["status"] = "PAUSE"
-            state["offset_sec"] = 0.0
-            state["timestamp"] = time.time()
+            playback_state.reset_controls()
 
 
 async def cleanup_swarms_task():
     while True:
         await asyncio.sleep(PEERS_INTERVAL_SEC)
         now = time.time()
-        to_notify: Dict[str, list[str]] = {}
-        # Remove stale peers
-        for track_id, swarm in list(swarms.items()):
+        rooms_to_refresh = []
+        for room, swarm in list(swarms.items()):
             removed = False
             for pid, meta in list(swarm.items()):
-                last_seen = float(meta.get("last_seen") or 0)
-                if now - last_seen > STALE_PEER_SEC:
+                if now - meta.last_seen > STALE_PEER_SEC:
                     swarm.pop(pid, None)
                     removed = True
             if removed and not swarm:
-                swarms.pop(track_id, None)
-            if removed and swarm:
-                to_notify[track_id] = list(swarm.keys())
-        # Push updated PEERS to remaining peers in affected swarms
-        for track_id, peer_ids in to_notify.items():
-            swarm = swarms.get(track_id) or {}
-            # Build full peers list for this track once
-            full_list = []
-            for pid, meta in swarm.items():
-                if "ip" in meta and "port" in meta and meta["port"]:
-                    full_list.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
-            for pid in peer_ids:
-                ws = ws_by_peer_id.get(pid)
-                if not ws:
-                    continue
-                # Exclude receiver from list
-                peers = [p for p in full_list if p["peer_id"] != pid]
-                out = {"type": "PEERS", "room": track_id, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
-                try:
-                    await ws.send_text(json.dumps(out))
-                except Exception:
-                    pass
+                swarms.pop(room, None)
+            elif removed:
+                rooms_to_refresh.append(room)
+        for room in rooms_to_refresh:
+            await push_peers_to_room(room)
 
 
 @app.on_event("startup")
 async def on_startup():
-    # Start background cleanup
     asyncio.create_task(cleanup_swarms_task())
 
 
