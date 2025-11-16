@@ -1,5 +1,13 @@
-# Thought process on how I am going to build this iteratively
+https://beat-torrent.fly.dev/
 
+Endpoint: wss://beat-torrent.fly.dev/ws/jam1
+
+## TODO:
+functionality across devices, test on Duke wifi
+
+
+
+## Old workflow
 ## Step1: one hardcoded room (jam1) where a host can send PLAY/PAUSE and everyone sees it (No HTTP, no files, no P2P)
 Host sends messages to server --> server broadcasts
 
