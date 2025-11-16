@@ -6,8 +6,13 @@ import time
 from typing import Optional, Set, Dict, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
+
+@app.get("/health")
+def root():
+    return {"status": "ok"}
 
 participants: Set[WebSocket] = set()
 host_id: Optional[int] = None
@@ -300,3 +305,5 @@ async def on_startup():
     # Start background cleanup
     asyncio.create_task(cleanup_swarms_task())
 
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

@@ -1,0 +1,13 @@
+# flyctl launch added from .gitignore
+# Python
+**/.venv
+**/__pycache__
+**/*.py[cod]
+
+# JS/Node?
+**/node_modules
+
+# Misc
+**/.DS_Store
+**/*.log
+fly.toml
