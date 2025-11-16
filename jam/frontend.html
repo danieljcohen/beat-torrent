@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jam Debug</title>
+    <style>
+      body {
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Arial,
+          sans-serif;
+        background: #0b1020;
+        color: #e6e9f5;
+        margin: 0;
+      }
+      .wrap {
+        max-width: 920px;
+        margin: 32px auto;
+        padding: 0 16px;
+      }
+      .card {
+        background: #141b34;
+        border: 1px solid #243056;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      label {
+        font-size: 12px;
+        color: #a9b4d0;
+      }
+      input[type="text"],
+      input[type="number"] {
+        background: #0f162b;
+        color: #e6e9f5;
+        border: 1px solid #243056;
+        border-radius: 8px;
+        padding: 8px 10px;
+        outline: none;
+      }
+      input[type="text"]:focus,
+      input[type="number"]:focus {
+        border-color: #5b78ff;
+      }
+      button {
+        background: #5b78ff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #2b375f;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .log {
+        background: #0f162b;
+        border: 1px solid #243056;
+        border-radius: 8px;
+        padding: 10px;
+        height: 260px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+      }
+      .pill.ok {
+        background: #11391d;
+        color: #7bff9b;
+        border: 1px solid #1f6b3b;
+      }
+      .pill.bad {
+        background: #3a1111;
+        color: #ff7b7b;
+        border: 1px solid #6b1f1f;
+      }
+      .muted {
+        color: #a9b4d0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Jam Debug</h1>
+      <div class="card">
+        <div class="row">
+          <div>
+            <label>Endpoint</label><br />
+            <input
+              id="wsUrl"
+              type="text"
+              value="ws://localhost:8000/ws/jam1"
+              size="40"
+            />
+          </div>
+          <div>
+            <label>Role</label><br />
+            <label
+              ><input type="radio" name="role" value="host" checked />
+              host</label
+            >
+            <label style="margin-left: 8px"
+              ><input type="radio" name="role" value="viewer" /> viewer</label
+            >
+          </div>
+          <div>
+            <label>Display Name</label><br />
+            <input id="displayName" type="text" value="Debug" />
+          </div>
+          <div style="margin-left: auto">
+            <button id="connectBtn">Connect</button>
+            <button id="disconnectBtn" class="secondary" disabled>
+              Disconnect
+            </button>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 10px">
+          <div>
+            <label>track_id</label><br />
+            <input id="trackId" type="text" value="t1" />
+          </div>
+          <div>
+            <label>offset_sec</label><br />
+            <input id="offsetSec" type="number" value="0" step="0.01" />
+          </div>
+          <div style="display: flex; align-items: flex-end; gap: 8px">
+            <button id="playBtn" disabled>PLAY</button>
+            <button id="pauseBtn" class="secondary" disabled>PAUSE</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 10px">
+          <div>
+            <label>My Peer ID</label><br />
+            <input
+              id="myPeerId"
+              type="text"
+              value="(none)"
+              size="18"
+              readonly
+            />
+          </div>
+          <div>
+            <label>To Peer ID</label><br />
+            <input id="toPeerId" type="text" placeholder="peer id" size="18" />
+          </div>
+          <div style="flex: 1; min-width: 260px">
+            <label>Blob JSON</label><br />
+            <input
+              id="signalBlob"
+              type="text"
+              placeholder='{"hello":"world"}'
+              style="width: 100%"
+            />
+          </div>
+          <div style="display: flex; align-items: flex-end; gap: 8px">
+            <button id="signalBtn" class="secondary" disabled>
+              Send SIGNAL
+            </button>
+            <button id="connectP2pBtn">Connect P2P</button>
+            <button id="disconnectP2pBtn" class="secondary">
+              Disconnect P2P
+            </button>
+          </div>
+        </div>
+        <div style="margin-top: 10px">
+          <span id="statusPill" class="pill bad">disconnected</span>
+          <span class="muted" id="stateLine"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>Browser Player (Phase 3)</label>
+        <div class="row" style="margin-top: 8px">
+          <input id="fileInput" type="file" accept="audio/mpeg,audio/mp3" />
+          <button id="loadMp3Btn">Load MP3 into RAM</button>
+          <div>
+            <label>Start Threshold (KB)</label><br />
+            <input
+              id="startThresholdKB"
+              type="number"
+              value="256"
+              style="width: 100px"
+            />
+          </div>
+          <div>
+            <label>Rebuffer Threshold (sec)</label><br />
+            <input
+              id="rebufferThresholdSec"
+              type="number"
+              value="2.0"
+              step="0.1"
+              style="width: 100px"
+            />
+          </div>
+          <div>
+            <label>Resume Threshold (sec)</label><br />
+            <input
+              id="resumeThresholdSec"
+              type="number"
+              value="4.0"
+              step="0.1"
+              style="width: 100px"
+            />
+          </div>
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <audio id="audioEl" controls style="width: 100%"></audio>
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <span class="muted" id="playerStatus">idle</span>
+          <span class="muted" id="bufferInfo" style="margin-left: auto"
+            >ahead=0.00s</span
+          >
+        </div>
+      </div>
+
+      <div class="card">
+        <label>Logs</label>
+        <div id="log" class="log"></div>
+      </div>
+
+      <div class="card">
+        <label>Tracker Peer Controls</label>
+        <div class="row" style="margin-top: 8px">
+          <div>
+            <label>Room</label><br />
+            <input id="roomName" type="text" value="jam1" size="10" />
+          </div>
+          <div>
+            <label>Announce Port</label><br />
+            <input id="announcePort" type="number" value="9005" />
+          </div>
+          <div>
+            <label>Total Chunks</label><br />
+            <input id="totalChunks" type="number" value="12" />
+          </div>
+          <div>
+            <label>Chunk Size</label><br />
+            <input id="chunkSize" type="number" value="4096" />
+          </div>
+          <div>
+            <label>Have Count</label><br />
+            <input id="haveCount" type="number" value="0" />
+          </div>
+          <div style="display: flex; align-items: flex-end; gap: 8px">
+            <label style="display: flex; align-items: center; gap: 6px">
+              <input id="autoAnnounce" type="checkbox" checked /> auto-announce
+              on connect
+            </label>
+          </div>
+          <div style="display: flex; align-items: flex-end">
+            <button id="announceBtn">Announce</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <div style="flex: 1; min-width: 260px">
+            <label>HAVE_DELTA indices (comma-separated)</label><br />
+            <input
+              id="deltaIndices"
+              type="text"
+              placeholder="e.g. 1,2,3"
+              style="width: 100%"
+            />
+          </div>
+          <div style="display: flex; align-items: flex-end">
+            <button id="sendDeltaBtn" class="secondary">Send HAVE_DELTA</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>PeerBuffer Tests</label>
+        <div class="row" style="margin-top: 8px">
+          <div class="muted">
+            Uses Total Chunks and Chunk Size from tracker controls above.
+          </div>
+          <div style="margin-left: auto">
+            <button id="runPhase1Btn" class="secondary">
+              Run Phase 1 & 2 tests
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>Swarm (jam1)</label>
+        <div class="row" style="margin: 6px 0 10px">
+          <button id="logPeersBtn" class="secondary">
+            Log peers to console
+          </button>
+        </div>
+        <table
+          id="swarmTable"
+          style="width: 100%; border-collapse: collapse; font-size: 12px"
+        >
+          <thead>
+            <tr>
+              <th style="text-align: left">Peer</th>
+              <th>IP</th>
+              <th>Port</th>
+              <th>Have</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script src="./frontend.js"></script>
+  </body>
+</html>
