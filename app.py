@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
@@ -119,7 +119,7 @@ class HelloValidationError(Exception):
 
 
 def generate_peer_id() -> str:
-    return uuid.uuid4().hex
+    return secrets.token_hex(3)
 
 
 async def send_json(ws: WebSocket, payload: Dict[str, Any]) -> None:
