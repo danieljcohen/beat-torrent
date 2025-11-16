@@ -488,36 +488,173 @@ function startAppendLoop() {
         setPlayerStatus(`append error: ${e && e.message ? e.message : e}`);
       }
     }
-  }, 200);
-  // Start/refresh rebuffer monitor
-  if (rebufferTimer) {
-    clearInterval(rebufferTimer);
-    rebufferTimer = null;
-  }
-  rebufferTimer = setInterval(() => {
-    const ahead = getBufferedAheadSec();
-    if (bufferInfo) {
-      try {
-        bufferInfo.textContent = `ahead=${ahead.toFixed(2)}s`;
-      } catch (_) {}
+
+    if (loadMp3Btn) {
+      loadMp3Btn.onclick = async () => {
+        const file = (fileInput && fileInput.files && fileInput.files[0]) ? fileInput.files[0] : null;
+        if (!file) {
+          appendLog('!', 'Select an MP3 file first');
+          return;
+        }
+        const cSize = parseInt(chunkSize.value || '0', 10);
+        if (!Number.isFinite(cSize) || cSize <= 0) {
+          appendLog('!', 'Invalid Chunk Size');
+          return;
+        }
+        try {
+          setPlayerStatus('reading file...');
+          const buf = new Uint8Array(await file.arrayBuffer());
+          fileSizeBytes = buf.length;
+          const nChunks = Math.ceil(fileSizeBytes / cSize);
+          if (totalChunks) totalChunks.value = String(nChunks);
+          pbHost = new PeerBuffer(nChunks, cSize);
+          // Fill chunks; pad final chunk if needed
+          for (let idx=0; idx<nChunks; idx++){
+            const start = idx * cSize;
+            const end = Math.min(start + cSize, fileSizeBytes);
+            const slice = buf.slice(start, end);
+            let payload = slice;
+            if (slice.length < cSize) {
+              const padded = new Uint8Array(cSize);
+              padded.set(slice, 0);
+              payload = padded;
+            }
+            pbHost.setChunk(idx, payload);
+          }
+          pbActive = pbHost;
+          if (haveCount) haveCount.value = String(pbActive.haveCount);
+          appendLog('ℹ', `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
+          // Initialize availability tables for host
+          initPeersByChunk(nChunks);
+          // Initialize blank bitmaps for all known peers
+          for (const pid of dcByPeer.keys()) {
+            if (!haveBitmapByPeer.has(pid)) {
+              haveBitmapByPeer.set(pid, new Array(nChunks).fill(0));
+            }
+          }
+          // If a datachannel is already open, push TRACK_META to viewer(s)
+          try {
+            const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
+            for (const [pid, ch] of dcByPeer.entries()) {
+              if (ch && ch.readyState === 'open') {
+                try { ch.send(JSON.stringify(meta)); } catch (_) {}
+                try { sendHaveBitmap(ch); } catch (_) {}
+              }
+            }
+            appendLog('ℹ', 'Sent TRACK_META to open peers');
+          } catch (_) {}
+          initMediaSource();
+          startAppendLoop();
+        } catch (e) {
+          setPlayerStatus(`load error: ${e && e.message ? e.message : e}`);
+        }
+      };
     }
-    const threshSec = Math.max(
-      0.1,
-      parseFloat(
-        rebufferThresholdSec && rebufferThresholdSec.value
-          ? rebufferThresholdSec.value
-          : "2.0",
-      ) || 2.0,
-    );
-    if (!awaitingStart && !audioEl.paused && ahead < threshSec) {
-      // Auto-pause to prevent glitching; continue appending
-      try {
-        audioEl.pause();
-        autoPaused = true;
-        manualPaused = false;
-      } catch (_) {}
-    } else if (autoPaused) {
-      maybeStartOrResume();
+
+    // WebRTC DataChannel P2P for chunk transfer
+    const rtcConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
+    // Per-peer connections/channels
+    const pcByPeer = new Map();
+    const dcByPeer = new Map();
+    let primaryUpstreamPeerId = null;
+    let pendingDataHeader = null; // {index, length}
+    let inflight = 0;
+    let inflightMax = 8;
+    let nextToRequest = 0;
+    let recvNumChunks = 0;
+    let recvChunkSize = 0;
+    // Per-peer HAVE bitmap knowledge and announce throttle
+    const haveBitmapByPeer = new Map(); // peerId -> Array<0|1>
+    let bitmapAnnounceTimer = null;
+    // Availability tables: chunk-to-peers mapping
+    let peersByChunk = []; // Array<Set<peerId>>
+    // Round-robin peer selection
+    let rrIndex = 0;
+
+    function currentNumChunks(){
+      if (pbHost && Number.isFinite(pbHost.numChunks)) return pbHost.numChunks|0;
+      if (pbRecv && Number.isFinite(pbRecv.numChunks)) return pbRecv.numChunks|0;
+      return 0;
+    }
+
+    function buildLocalBitmap(){
+      const n = currentNumChunks();
+      if (n <= 0) return [];
+      const src = pbHost ? pbHost.have : (pbRecv ? pbRecv.have : null);
+      if (!src || !Array.isArray(src)) return new Array(n).fill(0);
+      const out = new Array(n);
+      for (let i=0;i<n;i++){ out[i] = src[i] ? 1 : 0; }
+      return out;
+    }
+
+    function sendHaveBitmap(channel){
+      if (!channel || channel.readyState !== 'open') return;
+      const n = currentNumChunks();
+      if (!Number.isFinite(n) || n <= 0) return;
+      const bitmap = buildLocalBitmap();
+      try { channel.send(JSON.stringify({ t: 'HAVE_BITMAP', bitmap })); } catch (_) {}
+    }
+
+    function broadcastHaveBitmap(){
+      const n = currentNumChunks();
+      if (!Number.isFinite(n) || n <= 0) return;
+      for (const [, ch] of dcByPeer.entries()){
+        if (ch && ch.readyState === 'open') {
+          sendHaveBitmap(ch);
+        }
+      }
+    }
+
+    function scheduleBitmapAnnounce(delayMs = 300){
+      if (bitmapAnnounceTimer) return;
+      bitmapAnnounceTimer = setTimeout(() => {
+        bitmapAnnounceTimer = null;
+        try { broadcastHaveBitmap(); } catch (_) {}
+      }, Math.max(0, delayMs|0));
+    }
+
+    function initPeersByChunk(numChunks){
+      peersByChunk = new Array(numChunks|0);
+      for (let i=0; i<peersByChunk.length; i++){
+        peersByChunk[i] = new Set();
+      }
+    }
+
+    function updatePeerAvailability(peerId, bitmap){
+      if (!Array.isArray(bitmap) || bitmap.length !== peersByChunk.length) return;
+      // Remove this peer from all chunks first
+      for (let i=0; i<peersByChunk.length; i++){
+        peersByChunk[i].delete(peerId);
+      }
+      // Add peer to chunks they have
+      for (let i=0; i<bitmap.length; i++){
+        if (bitmap[i]) {
+          peersByChunk[i].add(peerId);
+        }
+      }
+    }
+
+    function markPeerHasChunk(peerId, chunkIndex){
+      if (chunkIndex < 0 || chunkIndex >= peersByChunk.length) return;
+      peersByChunk[chunkIndex].add(peerId);
+      // Also update bitmap if exists
+      const bm = haveBitmapByPeer.get(peerId);
+      if (bm && chunkIndex < bm.length) {
+        bm[chunkIndex] = 1;
+      }
+    }
+
+    function resetP2P(){
+      try { for (const ch of dcByPeer.values()) { try { ch.close(); } catch (_) {} } } catch (_) {}
+      try { for (const p of pcByPeer.values()) { try { p.close(); } catch (_) {} } } catch (_) {}
+      pcByPeer.clear();
+      dcByPeer.clear();
+      primaryUpstreamPeerId = null;
+      pendingDataHeader = null;
+      inflight = 0; nextToRequest = 0;
+      recvNumChunks = 0; recvChunkSize = 0;
+      haveBitmapByPeer.clear();
+      peersByChunk = [];
     }
   }, 300);
 }
@@ -532,28 +669,64 @@ if (loadMp3Btn) {
       appendLog("!", "Select an MP3 file first");
       return;
     }
-    const cSize = parseInt(chunkSize.value || "0", 10);
-    if (!Number.isFinite(cSize) || cSize <= 0) {
-      appendLog("!", "Invalid Chunk Size");
-      return;
+
+    async function createPeerConnection(toPeerId, isInitiator){
+      if (pcByPeer.has(toPeerId)) {
+        return pcByPeer.get(toPeerId);
+      }
+      const pc = new RTCPeerConnection(rtcConfig);
+      pcByPeer.set(toPeerId, pc);
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          sendSignal(toPeerId, { wrtc: 'ice', candidate: e.candidate });
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        appendLog('ℹ', `pc(${toPeerId}) state=${pc.connectionState}`);
+        if (pc.connectionState === 'closed' || pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          try { const ch = dcByPeer.get(toPeerId); if (ch) { try { ch.close(); } catch (_) {} } } catch (_) {}
+          dcByPeer.delete(toPeerId);
+          pcByPeer.delete(toPeerId);
+          if (primaryUpstreamPeerId === toPeerId) {
+            primaryUpstreamPeerId = null;
+          }
+          // Clean up peer availability
+          haveBitmapByPeer.delete(toPeerId);
+          for (let i=0; i<peersByChunk.length; i++){
+            peersByChunk[i].delete(toPeerId);
+          }
+        }
+      };
+      if (isInitiator) {
+        const dc = pc.createDataChannel('data', { ordered: true });
+        dcByPeer.set(toPeerId, dc);
+        wireDataChannel(dc, toPeerId);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendSignal(toPeerId, { wrtc: 'offer', sdp: offer });
+      } else {
+        pc.ondatachannel = (ev) => {
+          const ch = ev.channel;
+          dcByPeer.set(toPeerId, ch);
+          wireDataChannel(ch, toPeerId);
+        };
+      }
+      return pc;
     }
-    try {
-      setPlayerStatus("reading file...");
-      const buf = new Uint8Array(await file.arrayBuffer());
-      fileSizeBytes = buf.length;
-      const nChunks = Math.ceil(fileSizeBytes / cSize);
-      if (totalChunks) totalChunks.value = String(nChunks);
-      pbHost = new PeerBuffer(nChunks, cSize);
-      // Fill chunks; pad final chunk if needed
-      for (let idx = 0; idx < nChunks; idx++) {
-        const start = idx * cSize;
-        const end = Math.min(start + cSize, fileSizeBytes);
-        const slice = buf.slice(start, end);
-        let payload = slice;
-        if (slice.length < cSize) {
-          const padded = new Uint8Array(cSize);
-          padded.set(slice, 0);
-          payload = padded;
+
+    function wireDataChannel(channel, peerId){
+      channel.binaryType = 'arraybuffer';
+      channel.onopen = () => {
+        appendLog('ℹ', `datachannel open (${peerId})`);
+        if (primaryUpstreamPeerId === null) {
+          primaryUpstreamPeerId = peerId;
+        }
+        // If we are the host (have pbHost loaded), send TRACK_META
+        if (pbHost && channel.readyState === 'open') {
+          const meta = { t: 'TRACK_META', numChunks: pbHost.numChunks, chunkSize: pbHost.chunkSize, totalSize: pbHost.totalSize };
+          channel.send(JSON.stringify(meta));
+          // Share initial HAVE bitmap
+          sendHaveBitmap(channel);
         }
         pbHost.setChunk(idx, payload);
       }
@@ -655,11 +828,71 @@ async function createPeerConnection(toPeerId, isInitiator) {
       pc.connectionState === "disconnected"
     ) {
       try {
-        const ch = dcByPeer.get(toPeerId);
-        if (ch) {
+        const msg = JSON.parse(text);
+        if (msg.t === 'TRACK_META') {
+          // Viewer path: initialize receiver buffer and player
+          recvNumChunks = msg.numChunks|0;
+          recvChunkSize = msg.chunkSize|0;
+          const total = msg.totalSize|0;
+          inflight = 0;
+          nextToRequest = 0;
+          pbRecv = new PeerBuffer(recvNumChunks, recvChunkSize);
+          pbActive = pbRecv;
+          fileSizeBytes = total;
+          if (totalChunks) totalChunks.value = String(recvNumChunks);
+          if (chunkSize) chunkSize.value = String(recvChunkSize);
+          // Initialize availability tables
+          initPeersByChunk(recvNumChunks);
+          // Initialize blank bitmaps for all known peers
+          for (const pid of dcByPeer.keys()) {
+            if (!haveBitmapByPeer.has(pid)) {
+              haveBitmapByPeer.set(pid, new Array(recvNumChunks).fill(0));
+            }
+          }
+          initMediaSource();
+          startAppendLoop();
+          // Kick off requests
+          scheduleRequests();
+          // After knowing numChunks, share our HAVE bitmap
+          sendHaveBitmap(channel);
+        } else if (msg.t === 'REQUEST') {
+          // Host path: send requested chunk back
+          const idx = msg.index|0;
+          if (!pbHost || !channel || channel.readyState !== 'open') return;
+          if (idx < 0 || idx >= pbHost.numChunks) return;
+          const start = idx * pbHost.chunkSize;
+          const payload = pbHost.readRange(start, pbHost.chunkSize);
+          // Always send full chunkSize bytes (payload will be chunkSize since pbHost seeded)
+          const header = { t: 'DATA', index: idx, length: payload.length };
           try {
-            ch.close();
-          } catch (_) {}
+            channel.send(JSON.stringify(header));
+            channel.send(payload);
+          } catch (e) {
+            appendLog('!', `send DATA failed idx=${idx}`);
+          }
+        } else if (msg.t === 'HAVE_BITMAP') {
+          // Record peer's HAVE bitmap
+          const arr = Array.isArray(msg.bitmap) ? msg.bitmap : [];
+          const n = currentNumChunks();
+          if (n > 0 && arr.length === n) {
+            const normalized = new Array(n);
+            for (let i=0;i<n;i++){ normalized[i] = arr[i] ? 1 : 0; }
+            haveBitmapByPeer.set(peerId, normalized);
+            // Update availability table
+            updatePeerAvailability(peerId, normalized);
+            appendLog('ℹ', `HAVE_BITMAP from ${peerId} received`);
+          }
+        } else if (msg.t === 'HAVE_DELTA_DC') {
+          // Single chunk update from peer
+          const idx = msg.index|0;
+          const n = currentNumChunks();
+          if (idx >= 0 && idx < n) {
+            markPeerHasChunk(peerId, idx);
+            appendLog('ℹ', `HAVE_DELTA_DC from ${peerId} chunk=${idx}`);
+          }
+        } else if (msg.t === 'DATA') {
+          // Expect binary next
+          pendingDataHeader = { index: msg.index|0, length: msg.length|0 };
         }
       } catch (_) {}
       dcByPeer.delete(toPeerId);
@@ -722,6 +955,12 @@ function wireDataChannel(channel, peerId) {
           .arrayBuffer()
           .then((buf) => handleDCBinary(new Uint8Array(buf), channel, peerId));
       }
+      pbRecv.setChunk(index, payload);
+      inflight = Math.max(0, inflight - 1);
+      if (haveCount) haveCount.value = String(pbRecv.haveCount);
+      scheduleRequests();
+      // Throttle broadcast of updated HAVE bitmap
+      scheduleBitmapAnnounce(400);
     }
   };
 }
@@ -764,42 +1003,129 @@ function handleDCText(text, channel, peerId) {
       // Expect binary next
       pendingDataHeader = { index: msg.index | 0, length: msg.length | 0 };
     }
-  } catch (_) {
-    // ignore
-  }
-}
 
-function handleDCBinary(bytes, channel, peerId) {
-  if (!pendingDataHeader || !pbRecv) return;
-  const { index, length } = pendingDataHeader;
-  pendingDataHeader = null;
-  if (bytes.length !== length) {
-    appendLog(
-      "!",
-      `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`,
-    );
-    return;
-  }
-  // Ensure chunk is chunkSize, pad if needed
-  let payload = bytes;
-  if (bytes.length !== pbRecv.chunkSize) {
-    const padded = new Uint8Array(pbRecv.chunkSize);
-    padded.set(bytes, 0);
-    payload = padded;
-  }
-  pbRecv.setChunk(index, payload);
-  inflight = Math.max(0, inflight - 1);
-  if (haveCount) haveCount.value = String(pbRecv.haveCount);
-  scheduleRequests();
-}
+    function choosePeerForChunk(availablePeers, chunkIndex) {
+      if (!availablePeers || availablePeers.length === 0) return null;
+      
+      // Filter peers that have this chunk
+      const peersWithChunk = availablePeers.filter(peer => {
+        const bm = haveBitmapByPeer.get(peer.pid);
+        return bm && bm[chunkIndex] === 1;
+      });
 
-function getUpstreamDc() {
-  let ch = primaryUpstreamPeerId ? dcByPeer.get(primaryUpstreamPeerId) : null;
-  if (!ch || ch.readyState !== "open") {
-    for (const [pid, c] of dcByPeer.entries()) {
-      if (c && c.readyState === "open") {
-        primaryUpstreamPeerId = pid;
-        return c;
+      // If no peer has it (bitmap incomplete), use all peers
+      const candidates = peersWithChunk.length > 0 ? peersWithChunk : availablePeers;
+      
+      // Round-robin selection
+      const peer = candidates[rrIndex % candidates.length];
+      rrIndex++;
+      return peer;
+    }
+
+    function sendRequest(peerId, chunkIndex) {
+      const ch = dcByPeer.get(peerId);
+      if (!ch || ch.readyState !== 'open') return false;
+      const msg = { t: 'REQUEST', index: chunkIndex };
+      try {
+        ch.send(JSON.stringify(msg));
+        inflight++;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    // Smart chunk scheduler: 3-phase strategy
+    function scheduleRequests(){
+      if (!pbRecv) return;
+      const numChunks = pbRecv.numChunks;
+      if (numChunks <= 0) return;
+
+      // Gather available peers
+      const availablePeers = [];
+      for (const [pid, ch] of dcByPeer.entries()) {
+        if (ch && ch.readyState === 'open') {
+          availablePeers.push({ pid, ch });
+        }
+      }
+      if (availablePeers.length === 0) return;
+
+      // Determine current playback position (in chunks)
+      const currentTimeSec = (audioEl && audioEl.currentTime) || 0;
+      const bytesPerSec = fileSizeBytes > 0 && audioEl && audioEl.duration > 0 ? fileSizeBytes / audioEl.duration : 0;
+      const playheadByte = bytesPerSec > 0 ? currentTimeSec * bytesPerSec : 0;
+      const playheadChunk = pbRecv.chunkSize > 0 ? Math.floor(playheadByte / pbRecv.chunkSize) : 0;
+
+      // Phase detection
+      const startThresholdBytes = Math.max(0, Math.floor((parseFloat(startThresholdKB && startThresholdKB.value ? startThresholdKB.value : '256') || 256) * 1024));
+      const startupChunkThreshold = pbRecv.chunkSize > 0 ? Math.ceil(startThresholdBytes / pbRecv.chunkSize) : 10;
+      const contiguousEnd = pbRecv.contiguousChunkEnd || 0;
+      const endgameThreshold = Math.floor(numChunks * 0.85); // last 15%
+      const safeZoneChunks = 20; // ~20 chunks ahead of playhead
+
+      let phase = 'startup';
+      if (contiguousEnd >= startupChunkThreshold) {
+        if (pbRecv.haveCount >= endgameThreshold) {
+          phase = 'endgame';
+        } else {
+          phase = 'stable';
+        }
+      }
+
+      // Build candidate list based on phase
+      const candidates = [];
+
+      if (phase === 'startup') {
+        // PHASE 1: Sequential from 0 until startupChunkThreshold
+        for (let i = 0; i < Math.min(startupChunkThreshold, numChunks); i++) {
+          if (!pbRecv.have[i]) {
+            candidates.push({ index: i, priority: 1000000 - i }); // high priority, sequential
+          }
+        }
+      } else if (phase === 'stable') {
+        // PHASE 2: Split-zone strategy
+        const playbackZoneEnd = Math.min(playheadChunk + safeZoneChunks, numChunks);
+        
+        // Playback zone: sequential near playhead
+        for (let i = playheadChunk; i < playbackZoneEnd; i++) {
+          if (i >= 0 && i < numChunks && !pbRecv.have[i]) {
+            candidates.push({ index: i, priority: 2000000 - i }); // highest priority
+          }
+        }
+
+        // Swarm zone: rarest-first beyond safe zone
+        for (let i = playbackZoneEnd; i < numChunks; i++) {
+          if (!pbRecv.have[i]) {
+            const rarity = peersByChunk[i] ? peersByChunk[i].size : 0;
+            // Lower rarity = higher priority (rarest first)
+            const priority = 1000000 - (rarity * 10000) + (Math.random() * 100);
+            candidates.push({ index: i, priority });
+          }
+        }
+      } else if (phase === 'endgame') {
+        // PHASE 3: Sequential tail, fill any gaps
+        for (let i = 0; i < numChunks; i++) {
+          if (!pbRecv.have[i]) {
+            candidates.push({ index: i, priority: 3000000 - i });
+          }
+        }
+      }
+
+      // Sort by priority (highest first)
+      candidates.sort((a, b) => b.priority - a.priority);
+
+      // Issue requests up to inflightMax using round-robin peer selection
+      let issued = 0;
+      for (const cand of candidates) {
+        if (inflight >= inflightMax) break;
+        const idx = cand.index;
+        
+        // Use round-robin to select peer for this chunk
+        const selectedPeer = choosePeerForChunk(availablePeers, idx);
+        
+        if (selectedPeer && sendRequest(selectedPeer.pid, idx)) {
+          issued++;
+        }
       }
     }
     return null;
