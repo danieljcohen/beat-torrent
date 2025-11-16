@@ -1,3 +1,10 @@
+## Running
+(from /jam)
+uvicorn app:app --reload --port 8000
+open frontend.html
+
+Terminal: websocat -t ws://localhost:8000/ws/jam1
+
 ## Formatting
 
 1. Install the JavaScript tooling once: `npm install`
