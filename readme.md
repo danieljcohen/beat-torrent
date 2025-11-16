@@ -1,9 +1,11 @@
 ## Dependencies
+
 pip install -r jam/requirements.txt
 
 npm install
 
 ## Formatting
+
 Not sure how you set this up but want to prevent overinflated code diffs from our different formattors
 
 1. Install the JavaScript tooling once: `npm install`
@@ -12,21 +14,18 @@ Not sure how you set this up but want to prevent overinflated code diffs from ou
 Prettier automatically reads `.editorconfig`, so the whitespace rules defined there (LF line endings, trim trailing whitespace, 4-space Python, 2-space HTML/JS, etc.) are enforced whenever you run the formatter or rely on editor integrations.
 
 ## Running
+
 (from /jam)
 uvicorn app:app --reload --port 8000
 
 open frontend.html
 
-
 Terminal: websocat -t ws://localhost:8000/ws/jam1
-
-
-
-
 
 # Thought process on how I am going to build this iteratively
 
 ## Step1: one hardcoded room (jam1) where a host can send PLAY/PAUSE and everyone sees it (No HTTP, no files, no P2P)
+
 Host sends messages to server --> server broadcasts
 
 How to test step 1:
@@ -35,21 +34,22 @@ cd jam
 source .venv/bin/activate
 
 1. Start server
-uvicorn app:app --reload --port 8000
-(I put a 20 sec timeout so send the "HELLO" fast or increase the timeout if ur slow)
+   uvicorn app:app --reload --port 8000
+   (I put a 20 sec timeout so send the "HELLO" fast or increase the timeout if ur slow)
 
-2. Start host 
-websocat -t ws://localhost:8000/ws/jam1
-{"type":"HELLO","role":"host"}
+2. Start host
+   websocat -t ws://localhost:8000/ws/jam1
+   {"type":"HELLO","role":"host"}
 
 expected response:
 {"type": "STATE", "payload": {"track_id": null, "status": "PAUSE", "offset_sec": 0.0, "timestamp": 1762569219.737918}}
 
 3. Start viewer
-websocat -t ws://localhost:8000/ws/jam1
-{"type":"HELLO","role":"viewer"}
+   websocat -t ws://localhost:8000/ws/jam1
+   {"type":"HELLO","role":"viewer"}
 
 ## Step 2: Starting host then viewer is super annoying for testing start 1. Simple web UI to test host message --> server --> all participants
+
 Start server:
 websocat -t ws://localhost:8000/ws/jam
 
@@ -86,14 +86,9 @@ Make sure there is data then ur good
 How to test
 Terminal 1
 python peer.py \
-  --listen-port 9003 --seed --num-chunks 120 --chunk-size 4096
+ --listen-port 9003 --seed --num-chunks 120 --chunk-size 4096
 
 Terminal 2
 python peer.py \
-  --listen-port 9004 --num-chunks 120 --chunk-size 4096 \
-  --connect [IP_ADDRESS]:9003 (use ur own IP)
-
-
-
-
-
+ --listen-port 9004 --num-chunks 120 --chunk-size 4096 \
+ --connect [IP_ADDRESS]:9003 (use ur own IP)
