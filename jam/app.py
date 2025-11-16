@@ -81,6 +81,10 @@ async def ws_jam1(websocket: WebSocket):
             await websocket.close(code=1008, reason="Host already assigned")
             return
         host_id = id(websocket)
+        # Reset state to PAUSE when new host connects
+        state["status"] = "PAUSE"
+        state["offset_sec"] = 0.0
+        state["timestamp"] = time.time()
 
     # Add participant
     participants.add(websocket)
@@ -246,8 +250,11 @@ async def ws_jam1(websocket: WebSocket):
                 if not swarm:
                     swarms.pop(track_id, None)
         if is_host and host_id == id(websocket):
-            # Clear host if it was this socket
+            # Clear host if it was this socket and reset state to PAUSE
             host_id = None
+            state["status"] = "PAUSE"
+            state["offset_sec"] = 0.0
+            state["timestamp"] = time.time()
 
 
 async def cleanup_swarms_task():
