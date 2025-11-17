@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Jam Debug</title>
+    <title>BeatTorrent</title>
     <style>
       body {
         font-family:
@@ -101,7 +101,7 @@
   </head>
   <body>
     <div class="wrap">
-      <h1>Jam Debug</h1>
+      <h1>BeatTorrent 🎶</h1>
       <div class="card">
         <div class="row">
           <div>
@@ -316,8 +316,39 @@
           <tbody></tbody>
         </table>
       </div>
+
+      <div class="card">
+        <label>P2P Graph</label>
+        <div class="graph">
+          <svg
+            id="p2pGraph"
+            width="800"
+            height="500"
+            style="
+              background: #0f162b;
+              border-radius: 8px;
+              border: 1px solid #243056;
+            "></svg>
+          <div
+            id="p2pTooltip"
+            style="
+              position: absolute;
+              display: none;
+              pointer-events: none;
+              background: rgba(20, 27, 52, 0.95);
+              padding: 8px 12px;
+              border-radius: 6px;
+              border: 1px solid #243056;
+              color: #e6e9f5;
+              font-size: 12px;
+              z-index: 10;
+            "></div>
+        </div>
+      </div>
     </div>
 
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="./p2p-graph.js"></script>
     <script src="./frontend.js"></script>
   </body>
 </html>
