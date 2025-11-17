@@ -6,6 +6,7 @@
     addLink: noop,
     removeLink: noop,
     hasPeer: () => false,
+    reset: noop,
   };
 
   if (!global.d3) {
@@ -120,7 +121,7 @@
 
   function addOrUpdatePeer(peerId, meta = {}) {
     if (!peerId) return;
-    const existing = state.nodes.get(peerId) || { id: peerId };
+    const existing = state.nodes.get(peerId) || {id: peerId};
     existing.isHost = !!meta.isHost;
     if (meta.ip !== undefined) existing.ip = meta.ip;
     if (meta.port !== undefined) existing.port = meta.port;
@@ -133,8 +134,10 @@
     if (!peerId) return;
     state.nodes.delete(peerId);
     for (const [key, link] of state.links) {
-      const src = typeof link.source === "object" ? link.source.id : link.source;
-      const dst = typeof link.target === "object" ? link.target.id : link.target;
+      const src =
+        typeof link.source === "object" ? link.source.id : link.source;
+      const dst =
+        typeof link.target === "object" ? link.target.id : link.target;
       if (src === peerId || dst === peerId) {
         state.links.delete(key);
       }
@@ -145,7 +148,7 @@
   function addLink(a, b) {
     const key = keyForLink(a, b);
     if (!key) return;
-    state.links.set(key, { key, source: a, target: b });
+    state.links.set(key, {key, source: a, target: b});
     updateGraph();
   }
 
@@ -158,6 +161,13 @@
 
   function hasPeer(peerId) {
     return state.nodes.has(peerId);
+  }
+
+  function reset() {
+    state.nodes.clear();
+    state.links.clear();
+    updateGraph();
+    if (state.tooltip) state.tooltip.style.display = "none";
   }
 
   function tooltipHtml(d) {
@@ -191,5 +201,6 @@
     addLink,
     removeLink,
     hasPeer,
+    reset,
   };
 })(window);

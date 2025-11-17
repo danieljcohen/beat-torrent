@@ -30,6 +30,7 @@ const bufferInfo = $("bufferInfo");
 const startThresholdKB = $("startThresholdKB");
 const rebufferThresholdSec = $("rebufferThresholdSec");
 const resumeThresholdSec = $("resumeThresholdSec");
+const logPeersBtn = $("logPeersBtn");
 
 const graph = window.P2PGraph || {
   addOrUpdatePeer: () => {},
@@ -37,6 +38,7 @@ const graph = window.P2PGraph || {
   addLink: () => {},
   removeLink: () => {},
   hasPeer: () => false,
+  reset: () => {},
 };
 
 let ws = null;
@@ -171,6 +173,15 @@ connectBtn.onclick = () => {
               // ignore
             }
           }
+        } else if (blob && blob.graph_event === "PEER_LEFT") {
+          const departed = blob.peer_id;
+          if (departed) {
+            graph.removePeer(departed);
+            if (Array.isArray(lastPeers)) {
+              lastPeers = lastPeers.filter((p) => p.peer_id !== departed);
+            }
+            appendLog("ℹ", `Peer ${departed} disconnected`);
+          }
         } else {
           // Show who sent it and the blob contents
           appendLog("←", `SIGNAL from ${from}: ${JSON.stringify(msg.blob)}`);
@@ -180,6 +191,8 @@ connectBtn.onclick = () => {
   };
   ws.onerror = () => appendLog("!", "WebSocket error");
   ws.onclose = (ev) => {
+    graph.removePeer(myPeerIdInput.value);
+    graph.reset();
     appendLog(
       "!",
       `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`
@@ -188,10 +201,41 @@ connectBtn.onclick = () => {
   };
 };
 
+function notifyPeersOfGraphLeave() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const myId =
+    myPeerIdInput && myPeerIdInput.value && myPeerIdInput.value !== "(none)"
+      ? myPeerIdInput.value
+      : null;
+  if (!myId) return;
+  const peers = Array.isArray(lastPeers) ? lastPeers : [];
+  peers.forEach((peer) => {
+    if (!peer || !peer.peer_id || peer.peer_id === myId) return;
+    const msg = {
+      type: "SIGNAL",
+      to: peer.peer_id,
+      blob: {graph_event: "PEER_LEFT", peer_id: myId},
+    };
+    try {
+      ws.send(JSON.stringify(msg));
+    } catch (_) {}
+  });
+}
+
 disconnectBtn.onclick = () => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    notifyPeersOfGraphLeave();
+    ws.close();
+  } else {
+    graph.reset();
+    appendLog("ℹ", "P2P disconnected");
+  }
   ws = null;
 };
+
+window.addEventListener("beforeunload", () => {
+  notifyPeersOfGraphLeave();
+});
 
 function sendControl(type) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1156,11 +1200,5 @@ if (connectP2pBtn) {
       return;
     }
     await createPeerConnection(to, true);
-  };
-}
-if (disconnectP2pBtn) {
-  disconnectP2pBtn.onclick = () => {
-    resetP2P();
-    appendLog("ℹ", "P2P disconnected");
   };
 }
