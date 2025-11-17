@@ -37,6 +37,7 @@ const graph = window.P2PGraph || {
   addLink: () => {},
   removeLink: () => {},
   hasPeer: () => false,
+  reset: () => {},
 };
 
 let ws = null;
@@ -180,6 +181,8 @@ connectBtn.onclick = () => {
   };
   ws.onerror = () => appendLog("!", "WebSocket error");
   ws.onclose = (ev) => {
+    graph.removePeer(myPeerIdInput.value);
+    graph.reset();
     appendLog(
       "!",
       `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`
@@ -189,7 +192,12 @@ connectBtn.onclick = () => {
 };
 
 disconnectBtn.onclick = () => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  } else {
+    graph.reset();
+    appendLog("ℹ", "P2P disconnected");
+  }
   ws = null;
 };
 
@@ -1156,11 +1164,5 @@ if (connectP2pBtn) {
       return;
     }
     await createPeerConnection(to, true);
-  };
-}
-if (disconnectP2pBtn) {
-  disconnectP2pBtn.onclick = () => {
-    resetP2P();
-    appendLog("ℹ", "P2P disconnected");
   };
 }
