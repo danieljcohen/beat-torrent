@@ -14,6 +14,11 @@ app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
 def root():
     return {"status": "ok"}
 
+@app.get("/api/room/{room_name}/host")
+def check_host(room_name: str):
+    """Check if a host is currently connected for the given room."""
+    return {"has_host": host_id is not None}
+
 participants: Set[WebSocket] = set()
 host_id: Optional[int] = None
 peer_id_by_ws: dict[WebSocket, str] = {}
