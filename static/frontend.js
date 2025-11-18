@@ -1089,7 +1089,7 @@ function wireDataChannel(channel, peerId) {
   channel.binaryType = "arraybuffer";
   channel.onopen = () => {
     appendLog("ℹ", `datachannel open (${peerId})`);
-    const myId = myPeerIdInput.value;
+    const myId = myPeerId;
     graph.addLink(myId, peerId);
     // Broadcast this connection to all other peers so they can update their graphs
     broadcastGraphConnection(myId, peerId, true);
@@ -1111,7 +1111,7 @@ function wireDataChannel(channel, peerId) {
   };
   channel.onclose = () => {
     appendLog("ℹ", `datachannel close (${peerId})`);
-    const myId = myPeerIdInput.value;
+    const myId = myPeerId;
     graph.removeLink(myId, peerId);
     // Broadcast disconnection to all other peers
     broadcastGraphConnection(myId, peerId, false);
