@@ -232,6 +232,22 @@ connectBtn.onclick = () => {
       } else if (msg.type === "SIGNAL") {
         const from = msg.from || "(unknown)";
         const blob = msg.blob || {};
+        // Handle graph connection events from other peers
+        if (blob && blob.graph_event === "PEER_CONNECTED") {
+          const peerA = blob.peer_a;
+          const peerB = blob.peer_b;
+          if (peerA && peerB) {
+            graph.addLink(peerA, peerB);
+            appendLog("ℹ", `Graph: ${peerA} ↔ ${peerB}`);
+          }
+        } else if (blob && blob.graph_event === "PEER_DISCONNECTED") {
+          const peerA = blob.peer_a;
+          const peerB = blob.peer_b;
+          if (peerA && peerB) {
+            graph.removeLink(peerA, peerB);
+            appendLog("ℹ", `Graph: ${peerA} ✗ ${peerB}`);
+          }
+        }
         // WebRTC signaling
         if (blob && blob.wrtc && from !== "(unknown)") {
           if (blob.wrtc === "offer") {
@@ -577,7 +593,7 @@ function startPeriodicSync() {
         }
       }
     }
-  }, 1000);
+  }, 20);
 }
 
 function stopPeriodicSync() {
@@ -1034,6 +1050,27 @@ function sendSignal(to, blob) {
   appendLog("→", {SIGNAL: blob});
 }
 
+function broadcastGraphConnection(peerA, peerB, isConnected) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!Array.isArray(lastPeers)) return;
+
+  const eventType = isConnected ? "PEER_CONNECTED" : "PEER_DISCONNECTED";
+  const blob = {
+    graph_event: eventType,
+    peer_a: peerA,
+    peer_b: peerB,
+  };
+
+  // Broadcast to all peers except the two involved in this connection
+  lastPeers.forEach((peer) => {
+    const pid = peer && peer.peer_id;
+    if (!pid || pid === peerA || pid === peerB) return;
+    try {
+      sendSignal(pid, blob);
+    } catch (_) {}
+  });
+}
+
 async function createPeerConnection(toPeerId, isInitiator) {
   if (pcByPeer.has(toPeerId)) {
     return pcByPeer.get(toPeerId);
@@ -1093,7 +1130,10 @@ function wireDataChannel(channel, peerId) {
   channel.binaryType = "arraybuffer";
   channel.onopen = () => {
     appendLog("ℹ", `datachannel open (${peerId})`);
-    graph.addLink(myPeerIdInput.value, peerId);
+    const myId = myPeerIdInput.value;
+    graph.addLink(myId, peerId);
+    // Broadcast this connection to all other peers so they can update their graphs
+    broadcastGraphConnection(myId, peerId, true);
     if (primaryUpstreamPeerId === null) {
       primaryUpstreamPeerId = peerId;
     }
@@ -1112,7 +1152,10 @@ function wireDataChannel(channel, peerId) {
   };
   channel.onclose = () => {
     appendLog("ℹ", `datachannel close (${peerId})`);
-    graph.removeLink(myPeerIdInput.value, peerId);
+    const myId = myPeerIdInput.value;
+    graph.removeLink(myId, peerId);
+    // Broadcast disconnection to all other peers
+    broadcastGraphConnection(myId, peerId, false);
   };
   channel.onerror = (e) =>
     appendLog(
