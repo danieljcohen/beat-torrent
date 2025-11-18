@@ -1,36 +1,26 @@
 const $ = (id) => document.getElementById(id);
-const logBox = $("log");
 const statusPill = $("statusPill");
-const stateLine = $("stateLine");
 const connectBtn = $("connectBtn");
 const disconnectBtn = $("disconnectBtn");
 const playBtn = $("playBtn");
 const pauseBtn = $("pauseBtn");
-const myPeerIdInput = $("myPeerId");
-const toPeerIdInput = $("toPeerId");
-const signalBlobInput = $("signalBlob");
-const signalBtn = $("signalBtn");
-const connectP2pBtn = $("connectP2pBtn");
-const disconnectP2pBtn = $("disconnectP2pBtn");
-const roomName = $("roomName");
-const announcePort = $("announcePort");
-const totalChunks = $("totalChunks");
-const chunkSize = $("chunkSize");
-const haveCount = $("haveCount");
-const autoAnnounce = $("autoAnnounce");
-const announceBtn = $("announceBtn");
-const deltaIndices = $("deltaIndices");
-const sendDeltaBtn = $("sendDeltaBtn");
-const runPhase1Btn = $("runPhase1Btn");
 const fileInput = $("fileInput");
-const loadMp3Btn = $("loadMp3Btn");
 const audioEl = $("audioEl");
 const playerStatus = $("playerStatus");
 const bufferInfo = $("bufferInfo");
-const startThresholdKB = $("startThresholdKB");
-const rebufferThresholdSec = $("rebufferThresholdSec");
-const resumeThresholdSec = $("resumeThresholdSec");
-const logPeersBtn = $("logPeersBtn");
+const logBox = $("log");
+const consoleToggle = $("consoleToggle");
+const consoleContent = $("consoleContent");
+const consoleArrow = $("consoleArrow");
+const hostControls = $("hostControls");
+const trackName = $("trackName");
+const currentTime = $("currentTime");
+const progressBar = $("progressBar");
+
+// Playback thresholds (hardcoded for simplicity)
+const startThresholdKB = 256;
+const rebufferThresholdSec = 2.0;
+const resumeThresholdSec = 4.0;
 
 const graph = window.P2PGraph || {
   addOrUpdatePeer: () => {},
@@ -43,16 +33,84 @@ const graph = window.P2PGraph || {
 
 let ws = null;
 let currentRole = "viewer";
+let myPeerId = null;
+let currentTrackName = "Unknown Track";
+let progressUpdateTimer = null;
+
+// Console toggle
+if (consoleToggle) {
+  consoleToggle.onclick = () => {
+    if (consoleContent.style.display === "none") {
+      consoleContent.style.display = "block";
+      consoleArrow.textContent = "▲";
+    } else {
+      consoleContent.style.display = "none";
+      consoleArrow.textContent = "▼";
+    }
+  };
+}
+
+// Progress bar update function
+function updateProgressDisplay() {
+  if (!audioEl) return;
+  
+  const currentPos = audioEl.currentTime || 0;
+  const duration = audioEl.duration;
+  
+  // Update time display
+  if (currentTime) {
+    const formatTime = (seconds) => {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+    
+    // Only show duration if it's a valid number
+    if (duration && isFinite(duration) && duration > 0) {
+      currentTime.textContent = `${formatTime(currentPos)} / ${formatTime(duration)}`;
+    } else {
+      currentTime.textContent = formatTime(currentPos);
+    }
+  }
+  
+  // Update progress bar
+  if (progressBar && duration && isFinite(duration) && duration > 0) {
+    const percent = (currentPos / duration) * 100;
+    progressBar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+  }
+}
+
+// Start progress updates
+function startProgressUpdates() {
+  if (progressUpdateTimer) return;
+  progressUpdateTimer = setInterval(updateProgressDisplay, 200);
+}
+
+// Stop progress updates
+function stopProgressUpdates() {
+  if (progressUpdateTimer) {
+    clearInterval(progressUpdateTimer);
+    progressUpdateTimer = null;
+  }
+}
+
+// Log function
 function now() {
   return new Date().toLocaleTimeString();
 }
+
 function appendLog(direction, payload) {
+  if (!logBox) return;
   const pre = document.createElement("div");
   const text = typeof payload === "string" ? payload : JSON.stringify(payload);
   pre.textContent = `[${now()}] ${direction} ${text}`;
   logBox.appendChild(pre);
   logBox.scrollTop = logBox.scrollHeight;
+  
+  // Also log to console for debugging
+  console.log(`${direction} ${text}`);
 }
+
 function setConnected(connected) {
   if (connected) {
     statusPill.textContent = "connected";
@@ -60,19 +118,26 @@ function setConnected(connected) {
     statusPill.classList.remove("bad");
     connectBtn.disabled = true;
     disconnectBtn.disabled = false;
-    playBtn.disabled = currentRole !== "host";
-    pauseBtn.disabled = currentRole !== "host";
-    signalBtn.disabled = false;
+    
+    // Show host controls only for host role
+    if (currentRole === "host" && hostControls) {
+      hostControls.style.display = "block";
+      playBtn.disabled = false;
+      pauseBtn.disabled = false;
+    }
   } else {
     statusPill.textContent = "disconnected";
     statusPill.classList.add("bad");
     statusPill.classList.remove("ok");
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
-    playBtn.disabled = true;
-    pauseBtn.disabled = true;
-    signalBtn.disabled = true;
-    myPeerIdInput.value = "(none)";
+    
+    if (hostControls) {
+      hostControls.style.display = "none";
+    }
+    if (playBtn) playBtn.disabled = true;
+    if (pauseBtn) pauseBtn.disabled = true;
+    myPeerId = null;
     playAuthorized = false;
   }
 }
@@ -82,7 +147,7 @@ connectBtn.onclick = () => {
   const role = [...document.querySelectorAll('input[name="role"]')].find(
     (r) => r.checked
   ).value;
-  const displayName = $("displayName").value.trim() || "Debug";
+  const displayName = $("displayName").value.trim() || "User";
   currentRole = role;
 
   appendLog("→", `Connecting to ${url} ...`);
@@ -93,28 +158,27 @@ connectBtn.onclick = () => {
     const hello = {type: "HELLO", role, display_name: displayName};
     ws.send(JSON.stringify(hello));
     appendLog("→", hello);
-    if (autoAnnounce.checked) {
-      announceNow();
-    }
+    // Auto-announce on connect
+    announceNow();
   };
   ws.onmessage = async (ev) => {
-    appendLog("←", ev.data);
     try {
       const msg = JSON.parse(ev.data);
+      // Log incoming messages (except frequent position updates)
+      if (msg.type !== "STATE" || !msg.payload || msg.payload.status !== "PLAY" || Math.random() < 0.1) {
+        appendLog("←", typeof ev.data === "string" ? ev.data : JSON.stringify(msg));
+      }
       if (msg.type === "STATE") {
         const p = msg.payload || {};
-        stateLine.textContent = `STATE: track=${p.track_id ?? "(none)"} status=${p.status} offset=${p.offset_sec} ts=${p.timestamp}`;
-
+        
         // latency estimation
         if (p.timestamp && typeof p.timestamp === "number") {
           const receiveTime = Date.now() / 1000;
-          const oneWayLatency = Math.max(0, (receiveTime - p.timestamp) / 2); // Estimate one-way as half RTT
+          const oneWayLatency = Math.max(0, (receiveTime - p.timestamp) / 2);
           syncLatencySamples.push(oneWayLatency);
-          // Keep last 10 samples for smoothing
           if (syncLatencySamples.length > 10) {
             syncLatencySamples.shift();
           }
-          // Calculate smoothed latency (median of recent samples)
           const sorted = [...syncLatencySamples].sort((a, b) => a - b);
           syncLatency = sorted[Math.floor(sorted.length / 2)];
         }
@@ -122,6 +186,7 @@ connectBtn.onclick = () => {
         // Host broadcasts control, all clients honor it
         playAuthorized = p.status === "PLAY";
         if (p.status === "PLAY") {
+          startProgressUpdates();
           manualPaused = false;
           // sync to host
           if (
@@ -140,7 +205,6 @@ connectBtn.onclick = () => {
             lastHostOffset = p.offset_sec;
             lastSyncTimestamp = hostTimestamp;
 
-            // only sync if off a lot to save seeks
             const currentPos = audioEl.currentTime || 0;
             const drift = Math.abs(currentPos - targetPosition);
 
@@ -159,15 +223,7 @@ connectBtn.onclick = () => {
 
                 if (canSeek || currentPos === 0) {
                   audioEl.currentTime = targetPosition;
-                  appendLog(
-                    "ℹ",
-                    `Synced to position ${targetPosition.toFixed(2)}s (drift was ${drift.toFixed(2)}s)`
-                  );
-                } else {
-                  appendLog(
-                    "ℹ",
-                    `Waiting for buffer at ${targetPosition.toFixed(2)}s before sync`
-                  );
+                  appendLog("ℹ", `Synced to position ${targetPosition.toFixed(2)}s (drift was ${drift.toFixed(2)}s)`);
                 }
               } catch (e) {
                 appendLog("!", `Sync seek failed: ${e}`);
@@ -176,9 +232,10 @@ connectBtn.onclick = () => {
           }
           maybeStartOrResume();
         } else if (p.status === "PAUSE") {
+          stopProgressUpdates();
+          updateProgressDisplay(); // Update one last time
           try {
             if (audioEl) audioEl.pause();
-            // sync position on pause
             if (
               p.offset_sec !== undefined &&
               typeof p.offset_sec === "number"
@@ -188,10 +245,6 @@ connectBtn.onclick = () => {
               if (drift > syncDriftThreshold) {
                 try {
                   audioEl.currentTime = p.offset_sec;
-                  appendLog(
-                    "ℹ",
-                    `Synced to pause position ${p.offset_sec.toFixed(2)}s`
-                  );
                 } catch (e) {
                   appendLog("!", `Pause sync failed: ${e}`);
                 }
@@ -214,11 +267,11 @@ connectBtn.onclick = () => {
         }
       } else if (msg.type === "PEER") {
         if (msg.peer_id) {
-          myPeerIdInput.value = msg.peer_id;
+          myPeerId = msg.peer_id;
           graph.addOrUpdatePeer(msg.peer_id, {isHost: currentRole === "host"});
         }
       } else if (msg.type === "PEERS") {
-        renderSwarm(msg.peers || []);
+        lastPeers = msg.peers || [];
         try {
           ensureConnections(msg.peers || []);
           (msg.peers || []).forEach((p) => {
@@ -251,7 +304,6 @@ connectBtn.onclick = () => {
         // WebRTC signaling
         if (blob && blob.wrtc && from !== "(unknown)") {
           if (blob.wrtc === "offer") {
-            // Answerer path
             const pc = await createPeerConnection(from, false);
             try {
               await pc.setRemoteDescription(
@@ -261,7 +313,7 @@ connectBtn.onclick = () => {
               await pc.setLocalDescription(answer);
               sendSignal(from, {wrtc: "answer", sdp: answer});
             } catch (e) {
-              appendLog("!", `offer handling failed`);
+              appendLog("!", "Offer handling failed");
             }
           } else if (blob.wrtc === "answer") {
             try {
@@ -272,7 +324,7 @@ connectBtn.onclick = () => {
                 );
               }
             } catch (e) {
-              appendLog("!", `answer handling failed`);
+              appendLog("!", "Answer handling failed");
             }
           } else if (blob.wrtc === "ice" && blob.candidate) {
             try {
@@ -280,9 +332,7 @@ connectBtn.onclick = () => {
               if (pc) {
                 await pc.addIceCandidate(new RTCIceCandidate(blob.candidate));
               }
-            } catch (e) {
-              // ignore
-            }
+            } catch (_) {}
           }
         } else if (blob && blob.graph_event === "PEER_LEFT") {
           const departed = blob.peer_id;
@@ -293,26 +343,23 @@ connectBtn.onclick = () => {
             }
             appendLog("ℹ", `Peer ${departed} disconnected`);
           }
-        } else {
-          // Show who sent it and the blob contents
-          appendLog("←", `SIGNAL from ${from}: ${JSON.stringify(msg.blob)}`);
         }
       }
     } catch (_) {}
   };
   ws.onerror = () => appendLog("!", "WebSocket error");
   ws.onclose = (ev) => {
-    graph.removePeer(myPeerIdInput.value);
+    if (myPeerId) {
+      graph.removePeer(myPeerId);
+    }
     graph.reset();
-    appendLog(
-      "!",
-      `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`
-    );
+    appendLog("!", `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`);
     setConnected(false);
 
-    // reset syn state
+    // reset sync state
     stopPeriodicSync();
     stopHostPositionBroadcast();
+    stopProgressUpdates();
     syncLatency = 0;
     syncLatencySamples = [];
     lastSyncTimestamp = 0;
@@ -323,18 +370,14 @@ connectBtn.onclick = () => {
 
 function notifyPeersOfGraphLeave() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const myId =
-    myPeerIdInput && myPeerIdInput.value && myPeerIdInput.value !== "(none)"
-      ? myPeerIdInput.value
-      : null;
-  if (!myId) return;
+  if (!myPeerId) return;
   const peers = Array.isArray(lastPeers) ? lastPeers : [];
   peers.forEach((peer) => {
-    if (!peer || !peer.peer_id || peer.peer_id === myId) return;
+    if (!peer || !peer.peer_id || peer.peer_id === myPeerId) return;
     const msg = {
       type: "SIGNAL",
       to: peer.peer_id,
-      blob: {graph_event: "PEER_LEFT", peer_id: myId},
+      blob: {graph_event: "PEER_LEFT", peer_id: myPeerId},
     };
     try {
       ws.send(JSON.stringify(msg));
@@ -348,7 +391,6 @@ disconnectBtn.onclick = () => {
     ws.close();
   } else {
     graph.reset();
-    appendLog("ℹ", "P2P disconnected");
   }
   ws = null;
 };
@@ -362,13 +404,11 @@ function sendControl(type) {
     appendLog("!", "Not connected");
     return;
   }
-  const offset =
-    audioEl && audioEl.currentTime !== undefined && audioEl.currentTime !== null
-      ? audioEl.currentTime
-      : parseFloat($("offsetSec").value || "0") || 0;
+  const offset = audioEl && audioEl.currentTime !== undefined && audioEl.currentTime !== null
+      ? audioEl.currentTime : 0;
   const msg = {
     type,
-    track_id: $("trackId").value || null,
+    track_id: "t1",
     offset_sec: offset,
     timestamp: Date.now() / 1000,
   };
@@ -385,79 +425,23 @@ function sendControl(type) {
 playBtn.onclick = () => sendControl("PLAY");
 pauseBtn.onclick = () => sendControl("PAUSE");
 
-signalBtn.onclick = () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    appendLog("!", "Not connected");
-    return;
-  }
-  const to = toPeerIdInput.value.trim();
-  if (!to) {
-    appendLog("!", "Enter target peer id");
-    return;
-  }
-  let blob;
-  try {
-    blob = JSON.parse(signalBlobInput.value || "{}");
-  } catch (e) {
-    appendLog("!", `Invalid JSON: ${e}`);
-    return;
-  }
-  const msg = {type: "SIGNAL", to, blob};
-  ws.send(JSON.stringify(msg));
-  appendLog("→", msg);
-};
-
 function announceNow() {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    appendLog("!", "Not connected");
     return;
   }
   const msg = {
     type: "ANNOUNCE",
-    room: roomName.value || "jam1",
-    port: parseInt(announcePort.value || "0", 10),
-    total_chunks: parseInt(totalChunks.value || "0", 10),
-    chunk_size: parseInt(chunkSize.value || "0", 10),
-    have_count: parseInt(haveCount.value || "0", 10),
+    room: "jam1",
+    port: 0,
+    total_chunks: currentNumChunks(),
+    chunk_size: pbHost ? pbHost.chunkSize : pbRecv ? pbRecv.chunkSize : 4096,
+    have_count: pbHost ? pbHost.haveCount : pbRecv ? pbRecv.haveCount : 0,
   };
   ws.send(JSON.stringify(msg));
-  appendLog("→", msg);
 }
-announceBtn.onclick = announceNow;
 
-sendDeltaBtn.onclick = () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    appendLog("!", "Not connected");
-    return;
-  }
-  const indices = (deltaIndices.value || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-    .map((s) => parseInt(s, 10))
-    .filter((n) => Number.isFinite(n));
-  const msg = {
-    type: "HAVE_DELTA",
-    room: roomName.value || "jam1",
-    indices,
-  };
-  ws.send(JSON.stringify(msg));
-  appendLog("→", msg);
-};
-
-// Swarm rendering
-const swarmTable = document.querySelector("#swarmTable tbody");
+// Track last known peers
 let lastPeers = [];
-function renderSwarm(peers) {
-  lastPeers = peers || [];
-  if (!swarmTable) return;
-  swarmTable.innerHTML = "";
-  lastPeers.forEach((p) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${p.peer_id}</td><td>${p.ip}</td><td>${p.port}</td><td>${p.have_count ?? 0}</td>`;
-    swarmTable.appendChild(tr);
-  });
-}
 
 // In-browser RAM buffer with contiguous guard
 class PeerBuffer {
@@ -582,10 +566,7 @@ function startPeriodicSync() {
               syncCorrectionInProgress = false;
             }, 100);
             if (drift > 0.2) {
-              appendLog(
-                "ℹ",
-                `Periodic sync: corrected drift ${drift.toFixed(2)}s`
-              );
+              appendLog("ℹ", `Periodic sync: corrected drift ${drift.toFixed(2)}s`);
             }
           }
         } catch (e) {
@@ -615,7 +596,7 @@ function startHostPositionBroadcast() {
     const currentPos = audioEl.currentTime || 0;
     const msg = {
       type: "PLAY",
-      track_id: $("trackId").value || null,
+      track_id: "t1",
       offset_sec: currentPos,
       timestamp: Date.now() / 1000,
     };
@@ -715,13 +696,7 @@ function maybeStartOrResume() {
   if (!playAuthorized) return;
   // Respect manual pause; don't auto-resume if user paused
   if (manualPaused) return;
-  const startKB =
-    parseFloat(
-      startThresholdKB && startThresholdKB.value
-        ? startThresholdKB.value
-        : "256"
-    ) || 256;
-  const startBytes = Math.max(0, Math.floor(startKB * 1024));
+  const startBytes = Math.max(0, Math.floor(startThresholdKB * 1024));
   const playable = pbActive ? pbActive.getLargestContiguousEnd() : 0;
   if (awaitingStart && playable >= startBytes) {
     audioEl
@@ -732,23 +707,8 @@ function maybeStartOrResume() {
       })
       .catch(() => {});
   } else if (autoPaused) {
-    const threshSec = Math.max(
-      0.1,
-      parseFloat(
-        rebufferThresholdSec && rebufferThresholdSec.value
-          ? rebufferThresholdSec.value
-          : "2.0"
-      ) || 2.0
-    );
-    let resumeSec = parseFloat(
-      resumeThresholdSec && resumeThresholdSec.value
-        ? resumeThresholdSec.value
-        : "4.0"
-    );
-    if (!Number.isFinite(resumeSec) || resumeSec <= 0)
-      resumeSec = Math.max(threshSec * 2, threshSec + 0.5);
     const ahead = getBufferedAheadSec();
-    if (ahead >= resumeSec) {
+    if (ahead >= resumeThresholdSec) {
       audioEl
         .play()
         .then(() => {
@@ -813,15 +773,7 @@ function startAppendLoop() {
         bufferInfo.textContent = `ahead=${ahead.toFixed(2)}s`;
       } catch (_) {}
     }
-    const threshSec = Math.max(
-      0.1,
-      parseFloat(
-        rebufferThresholdSec && rebufferThresholdSec.value
-          ? rebufferThresholdSec.value
-          : "2.0"
-      ) || 2.0
-    );
-    if (!awaitingStart && !audioEl.paused && ahead < threshSec) {
+    if (!awaitingStart && !audioEl.paused && ahead < rebufferThresholdSec) {
       // Auto-pause to prevent glitching; continue appending
       try {
         audioEl.pause();
@@ -834,27 +786,18 @@ function startAppendLoop() {
   }, 300);
 }
 
-if (loadMp3Btn) {
-  loadMp3Btn.onclick = async () => {
-    const file =
-      fileInput && fileInput.files && fileInput.files[0]
-        ? fileInput.files[0]
-        : null;
-    if (!file) {
-      appendLog("!", "Select an MP3 file first");
-      return;
-    }
-    const cSize = parseInt(chunkSize.value || "0", 10);
-    if (!Number.isFinite(cSize) || cSize <= 0) {
-      appendLog("!", "Invalid Chunk Size");
-      return;
-    }
+// Auto-load MP3 when file is selected
+if (fileInput) {
+  fileInput.onchange = async () => {
+    const file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    if (!file) return;
+    
+    const cSize = 4096; // Fixed chunk size
     try {
       setPlayerStatus("reading file...");
       const buf = new Uint8Array(await file.arrayBuffer());
       fileSizeBytes = buf.length;
       const nChunks = Math.ceil(fileSizeBytes / cSize);
-      if (totalChunks) totalChunks.value = String(nChunks);
       pbHost = new PeerBuffer(nChunks, cSize);
       // Fill chunks; pad final chunk if needed
       for (let idx = 0; idx < nChunks; idx++) {
@@ -870,11 +813,14 @@ if (loadMp3Btn) {
         pbHost.setChunk(idx, payload);
       }
       pbActive = pbHost;
-      if (haveCount) haveCount.value = String(pbActive.haveCount);
-      appendLog(
-        "ℹ",
-        `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`
-      );
+      currentTrackName = file.name;
+      appendLog("ℹ", `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
+      
+      // Update track name immediately
+      if (trackName) {
+        trackName.textContent = currentTrackName;
+        console.log("Set track name to:", currentTrackName);
+      }
       // Initialize availability tables for host
       initPeersByChunk(nChunks);
       // Initialize blank bitmaps for all known peers
@@ -903,8 +849,19 @@ if (loadMp3Btn) {
         }
         appendLog("ℹ", "Sent TRACK_META to open peers");
       } catch (_) {}
+      
+      // Announce to tracker
+      announceNow();
+      
       initMediaSource();
       startAppendLoop();
+      
+      // Wait for audio element to have duration, then update display
+      if (audioEl) {
+        audioEl.addEventListener('loadedmetadata', () => {
+          updateProgressDisplay();
+        }, { once: true });
+      }
     } catch (e) {
       setPlayerStatus(`load error: ${e && e.message ? e.message : e}`);
     }
@@ -930,6 +887,8 @@ let bitmapAnnounceTimer = null;
 let peersByChunk = []; // Array<Set<peerId>>
 // Round-robin peer selection
 let rrIndex = 0;
+// Throughput tracking
+const throughput = new Map(); // peerId -> {lastTime, lastBytes, rate}
 
 function currentNumChunks() {
   if (pbHost && Number.isFinite(pbHost.numChunks)) return pbHost.numChunks | 0;
@@ -1047,7 +1006,7 @@ function sendSignal(to, blob) {
   }
   const msg = {type: "SIGNAL", to, blob};
   ws.send(JSON.stringify(msg));
-  appendLog("→", {SIGNAL: blob});
+  appendLog("→", {SIGNAL: blob.wrtc || blob});
 }
 
 function broadcastGraphConnection(peerA, peerB, isConnected) {
@@ -1158,10 +1117,7 @@ function wireDataChannel(channel, peerId) {
     broadcastGraphConnection(myId, peerId, false);
   };
   channel.onerror = (e) =>
-    appendLog(
-      "!",
-      `datachannel error (${peerId}) ${e && e.message ? e.message : ""}`
-    );
+    appendLog("!", `datachannel error (${peerId}) ${e && e.message ? e.message : ""}`);
   channel.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       handleDCText(ev.data, channel, peerId);
@@ -1191,8 +1147,10 @@ function handleDCText(text, channel, peerId) {
       pbRecv = new PeerBuffer(recvNumChunks, recvChunkSize);
       pbActive = pbRecv;
       fileSizeBytes = total;
-      if (totalChunks) totalChunks.value = String(recvNumChunks);
-      if (chunkSize) chunkSize.value = String(recvChunkSize);
+      appendLog("ℹ", `Received TRACK_META: ${recvNumChunks} chunks, ${recvChunkSize} bytes/chunk, ${total} total bytes`);
+      if (trackName) {
+        trackName.textContent = "Receiving track...";
+      }
       // Initialize availability tables
       initPeersByChunk(recvNumChunks);
       // Initialize blank bitmaps for all known peers
@@ -1204,6 +1162,7 @@ function handleDCText(text, channel, peerId) {
       initMediaSource();
       startAppendLoop();
       // Kick off requests
+      appendLog("ℹ", `Starting chunk requests...`);
       scheduleRequests();
       // After knowing numChunks, share our HAVE bitmap
       sendHaveBitmap(channel);
@@ -1219,6 +1178,9 @@ function handleDCText(text, channel, peerId) {
       try {
         channel.send(JSON.stringify(header));
         channel.send(payload);
+        if (idx % 50 === 0) { // Log every 50th chunk to avoid spam
+          appendLog("ℹ", `Sent chunk ${idx}/${pbHost.numChunks} to ${peerId}`);
+        }
       } catch (e) {
         appendLog("!", `send DATA failed idx=${idx}`);
       }
@@ -1242,7 +1204,6 @@ function handleDCText(text, channel, peerId) {
       const n = currentNumChunks();
       if (idx >= 0 && idx < n) {
         markPeerHasChunk(peerId, idx);
-        appendLog("ℹ", `HAVE_DELTA_DC from ${peerId} chunk=${idx}`);
       }
     } else if (msg.t === "DATA") {
       // Expect binary next
@@ -1258,10 +1219,7 @@ function handleDCBinary(bytes, channel, peerId) {
   const {index, length} = pendingDataHeader;
   pendingDataHeader = null;
   if (bytes.length !== length) {
-    appendLog(
-      "!",
-      `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`
-    );
+    appendLog("!", `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`);
     return;
   }
   // Ensure chunk is chunkSize, pad if needed
@@ -1273,7 +1231,9 @@ function handleDCBinary(bytes, channel, peerId) {
   }
   pbRecv.setChunk(index, payload);
   inflight = Math.max(0, inflight - 1);
-  if (haveCount) haveCount.value = String(pbRecv.haveCount);
+  if (index % 50 === 0) { // Log every 50th chunk to avoid spam
+    appendLog("ℹ", `Received chunk ${index}/${pbRecv.numChunks} (${pbRecv.haveCount} total)`);
+  }
   scheduleRequests();
   // Throttle broadcast of updated HAVE bitmap
   scheduleBitmapAnnounce(400);
@@ -1332,13 +1292,20 @@ function choosePeerForChunk(availablePeers, chunkIndex) {
 
 function sendRequest(peerId, chunkIndex) {
   const ch = dcByPeer.get(peerId);
-  if (!ch || ch.readyState !== "open") return false;
+  if (!ch || ch.readyState !== "open") {
+    appendLog("!", `Cannot request chunk ${chunkIndex}: channel to ${peerId} not ready`);
+    return false;
+  }
   const msg = {t: "REQUEST", index: chunkIndex};
   try {
     ch.send(JSON.stringify(msg));
     inflight++;
+    if (chunkIndex === 0 || chunkIndex % 100 === 0) { // Log first and every 100th
+      appendLog("ℹ", `Requesting chunk ${chunkIndex} from ${peerId}`);
+    }
     return true;
-  } catch (_) {
+  } catch (e) {
+    appendLog("!", `Failed to request chunk ${chunkIndex}: ${e}`);
     return false;
   }
 }
@@ -1369,16 +1336,7 @@ function scheduleRequests() {
     pbRecv.chunkSize > 0 ? Math.floor(playheadByte / pbRecv.chunkSize) : 0;
 
   // Phase detection
-  const startThresholdBytes = Math.max(
-    0,
-    Math.floor(
-      (parseFloat(
-        startThresholdKB && startThresholdKB.value
-          ? startThresholdKB.value
-          : "256"
-      ) || 256) * 1024
-    )
-  );
+  const startThresholdBytes = Math.max(0, Math.floor(startThresholdKB * 1024));
   const startupChunkThreshold =
     pbRecv.chunkSize > 0
       ? Math.ceil(startThresholdBytes / pbRecv.chunkSize)
@@ -1451,33 +1409,18 @@ function scheduleRequests() {
       issued++;
     }
   }
+  
+  if (issued === 0 && candidates.length > 0 && availablePeers.length === 0) {
+    appendLog("!", `No peers available to request chunks from! Need P2P connections.`);
+  }
 }
 
 function ensureConnections(peers) {
-  const myId =
-    myPeerIdInput && myPeerIdInput.value && myPeerIdInput.value !== "(none)"
-      ? myPeerIdInput.value
-      : null;
   (peers || []).forEach((p) => {
     const pid = p && p.peer_id;
-    if (!pid) return;
+    if (!pid || !myPeerId) return;
     if (pcByPeer.has(pid)) return;
-    const initiate = !!(myId && String(myId) < String(pid));
+    const initiate = !!(myPeerId && String(myPeerId) < String(pid));
     createPeerConnection(pid, initiate).catch(() => {});
   });
-}
-
-if (connectP2pBtn) {
-  connectP2pBtn.onclick = async () => {
-    const to = ((toPeerIdInput && toPeerIdInput.value) || "").trim();
-    if (!to) {
-      appendLog("!", "Enter target peer id");
-      return;
-    }
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      appendLog("!", "Connect WS first");
-      return;
-    }
-    await createPeerConnection(to, true);
-  };
 }
