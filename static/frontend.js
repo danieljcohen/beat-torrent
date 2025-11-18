@@ -5,7 +5,6 @@ const disconnectBtn = $("disconnectBtn");
 const playBtn = $("playBtn");
 const pauseBtn = $("pauseBtn");
 const fileInput = $("fileInput");
-const loadMp3Btn = $("loadMp3Btn");
 const audioEl = $("audioEl");
 const playerStatus = $("playerStatus");
 const bufferInfo = $("bufferInfo");
@@ -708,16 +707,12 @@ function startAppendLoop() {
   }, 300);
 }
 
-if (loadMp3Btn) {
-  loadMp3Btn.onclick = async () => {
-    const file =
-      fileInput && fileInput.files && fileInput.files[0]
-        ? fileInput.files[0]
-        : null;
-    if (!file) {
-      alert("Select an MP3 file first");
-      return;
-    }
+// Auto-load MP3 when file is selected
+if (fileInput) {
+  fileInput.onchange = async () => {
+    const file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    if (!file) return;
+    
     const cSize = 4096; // Fixed chunk size
     try {
       setPlayerStatus("reading file...");
@@ -763,7 +758,7 @@ if (loadMp3Btn) {
             } catch (_) {}
             try {
               sendHaveBitmap(ch);
-            } catch (_) {            }
+            } catch (_) {}
           }
         }
         appendLog("ℹ", "Sent TRACK_META to open peers");
