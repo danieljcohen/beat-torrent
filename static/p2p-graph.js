@@ -52,28 +52,6 @@
     .attr("stroke-width", 1.5)
     .selectAll("circle");
 
-  function drag(sim) {
-    function dragstarted(event, d) {
-      if (!event.active) sim.alphaTarget(0.3).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    }
-    function dragged(event, d) {
-      d.fx = event.x;
-      d.fy = event.y;
-    }
-    function dragended(event, d) {
-      if (!event.active) sim.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    }
-    return d3
-      .drag()
-      .on("start", dragstarted)
-      .on("drag", dragged)
-      .on("end", dragended);
-  }
-
   function updateGraph() {
     const nodes = Array.from(state.nodes.values());
     const links = Array.from(state.links.values());
@@ -97,7 +75,6 @@
       .on("mouseover", handleNodeHover)
       .on("mousemove", handleNodeMove)
       .on("mouseout", handleNodeOut)
-      .call(drag(simulation))
       .merge(nodeEl);
 
     simulation.nodes(nodes).on("tick", () => {
