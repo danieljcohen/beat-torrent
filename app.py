@@ -5,10 +5,24 @@ import json
 import time
 from typing import Optional, Set, Dict, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
+
+# Middleware to add no-cache headers for JS files
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # Add no-cache headers for JS files to prevent caching issues
+        if request.url.path.endswith(('.js', '.html')):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 @app.get("/health")
 def root():
