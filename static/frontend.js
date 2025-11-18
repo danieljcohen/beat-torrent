@@ -12,6 +12,10 @@ const logBox = $("log");
 const consoleToggle = $("consoleToggle");
 const consoleContent = $("consoleContent");
 const consoleArrow = $("consoleArrow");
+const hostControls = $("hostControls");
+const trackName = $("trackName");
+const currentTime = $("currentTime");
+const progressBar = $("progressBar");
 
 // Playback thresholds (hardcoded for simplicity)
 const startThresholdKB = 256;
@@ -30,6 +34,8 @@ const graph = window.P2PGraph || {
 let ws = null;
 let currentRole = "viewer";
 let myPeerId = null;
+let currentTrackName = "Unknown Track";
+let progressUpdateTimer = null;
 
 // Console toggle
 if (consoleToggle) {
@@ -42,6 +48,50 @@ if (consoleToggle) {
       consoleArrow.textContent = "▼";
     }
   };
+}
+
+// Progress bar update function
+function updateProgressDisplay() {
+  if (!audioEl) return;
+  
+  const currentPos = audioEl.currentTime || 0;
+  const duration = audioEl.duration;
+  
+  // Update time display
+  if (currentTime) {
+    const formatTime = (seconds) => {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+    
+    // Only show duration if it's a valid number
+    if (duration && isFinite(duration) && duration > 0) {
+      currentTime.textContent = `${formatTime(currentPos)} / ${formatTime(duration)}`;
+    } else {
+      currentTime.textContent = formatTime(currentPos);
+    }
+  }
+  
+  // Update progress bar
+  if (progressBar && duration && isFinite(duration) && duration > 0) {
+    const percent = (currentPos / duration) * 100;
+    progressBar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+  }
+}
+
+// Start progress updates
+function startProgressUpdates() {
+  if (progressUpdateTimer) return;
+  progressUpdateTimer = setInterval(updateProgressDisplay, 200);
+}
+
+// Stop progress updates
+function stopProgressUpdates() {
+  if (progressUpdateTimer) {
+    clearInterval(progressUpdateTimer);
+    progressUpdateTimer = null;
+  }
 }
 
 // Log function
@@ -68,16 +118,25 @@ function setConnected(connected) {
     statusPill.classList.remove("bad");
     connectBtn.disabled = true;
     disconnectBtn.disabled = false;
-    playBtn.disabled = currentRole !== "host";
-    pauseBtn.disabled = currentRole !== "host";
+    
+    // Show host controls only for host role
+    if (currentRole === "host" && hostControls) {
+      hostControls.style.display = "block";
+      playBtn.disabled = false;
+      pauseBtn.disabled = false;
+    }
   } else {
     statusPill.textContent = "disconnected";
     statusPill.classList.add("bad");
     statusPill.classList.remove("ok");
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
-    playBtn.disabled = true;
-    pauseBtn.disabled = true;
+    
+    if (hostControls) {
+      hostControls.style.display = "none";
+    }
+    if (playBtn) playBtn.disabled = true;
+    if (pauseBtn) pauseBtn.disabled = true;
     myPeerId = null;
     playAuthorized = false;
   }
@@ -127,6 +186,7 @@ connectBtn.onclick = () => {
         // Host broadcasts control, all clients honor it
         playAuthorized = p.status === "PLAY";
         if (p.status === "PLAY") {
+          startProgressUpdates();
           manualPaused = false;
           // sync to host
           if (
@@ -172,6 +232,8 @@ connectBtn.onclick = () => {
           }
           maybeStartOrResume();
         } else if (p.status === "PAUSE") {
+          stopProgressUpdates();
+          updateProgressDisplay(); // Update one last time
           try {
             if (audioEl) audioEl.pause();
             if (
@@ -281,6 +343,7 @@ connectBtn.onclick = () => {
     // reset sync state
     stopPeriodicSync();
     stopHostPositionBroadcast();
+    stopProgressUpdates();
     syncLatency = 0;
     syncLatencySamples = [];
     lastSyncTimestamp = 0;
@@ -734,7 +797,14 @@ if (fileInput) {
         pbHost.setChunk(idx, payload);
       }
       pbActive = pbHost;
+      currentTrackName = file.name;
       appendLog("ℹ", `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
+      
+      // Update track name immediately
+      if (trackName) {
+        trackName.textContent = currentTrackName;
+        console.log("Set track name to:", currentTrackName);
+      }
       // Initialize availability tables for host
       initPeersByChunk(nChunks);
       // Initialize blank bitmaps for all known peers
@@ -769,6 +839,13 @@ if (fileInput) {
       
       initMediaSource();
       startAppendLoop();
+      
+      // Wait for audio element to have duration, then update display
+      if (audioEl) {
+        audioEl.addEventListener('loadedmetadata', () => {
+          updateProgressDisplay();
+        }, { once: true });
+      }
     } catch (e) {
       setPlayerStatus(`load error: ${e && e.message ? e.message : e}`);
     }
@@ -1032,6 +1109,9 @@ function handleDCText(text, channel, peerId) {
       pbActive = pbRecv;
       fileSizeBytes = total;
       appendLog("ℹ", `Received TRACK_META: ${recvNumChunks} chunks, ${recvChunkSize} bytes/chunk, ${total} total bytes`);
+      if (trackName) {
+        trackName.textContent = "Receiving track...";
+      }
       // Initialize availability tables
       initPeersByChunk(recvNumChunks);
       // Initialize blank bitmaps for all known peers
