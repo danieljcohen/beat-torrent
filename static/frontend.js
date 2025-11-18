@@ -104,18 +104,113 @@ connectBtn.onclick = () => {
       if (msg.type === "STATE") {
         const p = msg.payload || {};
         stateLine.textContent = `STATE: track=${p.track_id ?? "(none)"} status=${p.status} offset=${p.offset_sec} ts=${p.timestamp}`;
+
+        // latency estimation
+        if (p.timestamp && typeof p.timestamp === "number") {
+          const receiveTime = Date.now() / 1000;
+          const oneWayLatency = Math.max(0, (receiveTime - p.timestamp) / 2); // Estimate one-way as half RTT
+          syncLatencySamples.push(oneWayLatency);
+          // Keep last 10 samples for smoothing
+          if (syncLatencySamples.length > 10) {
+            syncLatencySamples.shift();
+          }
+          // Calculate smoothed latency (median of recent samples)
+          const sorted = [...syncLatencySamples].sort((a, b) => a - b);
+          syncLatency = sorted[Math.floor(sorted.length / 2)];
+        }
+
         // Host broadcasts control, all clients honor it
         playAuthorized = p.status === "PLAY";
         if (p.status === "PLAY") {
           manualPaused = false;
+          // sync to host
+          if (
+            p.offset_sec !== undefined &&
+            typeof p.offset_sec === "number" &&
+            audioEl
+          ) {
+            const receiveTime = Date.now() / 1000;
+            const hostTimestamp = p.timestamp || receiveTime;
+            const timeSinceHostAction = Math.max(
+              0,
+              receiveTime - hostTimestamp
+            );
+            const targetPosition = p.offset_sec + timeSinceHostAction;
+
+            lastHostOffset = p.offset_sec;
+            lastSyncTimestamp = hostTimestamp;
+
+            // only sync if off a lot to save seeks
+            const currentPos = audioEl.currentTime || 0;
+            const drift = Math.abs(currentPos - targetPosition);
+
+            if (drift > syncDriftThreshold || currentPos === 0) {
+              try {
+                const buffered = audioEl.buffered;
+                let canSeek = false;
+                for (let i = 0; i < buffered.length; i++) {
+                  const start = buffered.start(i);
+                  const end = buffered.end(i);
+                  if (targetPosition >= start && targetPosition <= end) {
+                    canSeek = true;
+                    break;
+                  }
+                }
+
+                if (canSeek || currentPos === 0) {
+                  audioEl.currentTime = targetPosition;
+                  appendLog(
+                    "ℹ",
+                    `Synced to position ${targetPosition.toFixed(2)}s (drift was ${drift.toFixed(2)}s)`
+                  );
+                } else {
+                  appendLog(
+                    "ℹ",
+                    `Waiting for buffer at ${targetPosition.toFixed(2)}s before sync`
+                  );
+                }
+              } catch (e) {
+                appendLog("!", `Sync seek failed: ${e}`);
+              }
+            }
+          }
           maybeStartOrResume();
         } else if (p.status === "PAUSE") {
           try {
             if (audioEl) audioEl.pause();
+            // sync position on pause
+            if (
+              p.offset_sec !== undefined &&
+              typeof p.offset_sec === "number"
+            ) {
+              const currentPos = audioEl.currentTime || 0;
+              const drift = Math.abs(currentPos - p.offset_sec);
+              if (drift > syncDriftThreshold) {
+                try {
+                  audioEl.currentTime = p.offset_sec;
+                  appendLog(
+                    "ℹ",
+                    `Synced to pause position ${p.offset_sec.toFixed(2)}s`
+                  );
+                } catch (e) {
+                  appendLog("!", `Pause sync failed: ${e}`);
+                }
+              }
+            }
           } catch (_) {}
           autoPaused = false;
-          // Keep awaitingStart true to require threshold on next PLAY
           awaitingStart = true;
+        }
+
+        if (p.status === "PLAY") {
+          if (currentRole === "viewer") {
+            startPeriodicSync();
+          } else if (currentRole === "host") {
+            startHostPositionBroadcast();
+          }
+        } else {
+          stopPeriodicSync();
+          stopHostPositionBroadcast();
         }
       } else if (msg.type === "PEER") {
         if (msg.peer_id) {
@@ -198,6 +293,15 @@ connectBtn.onclick = () => {
       `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`
     );
     setConnected(false);
+
+    // reset syn state
+    stopPeriodicSync();
+    stopHostPositionBroadcast();
+    syncLatency = 0;
+    syncLatencySamples = [];
+    lastSyncTimestamp = 0;
+    lastHostOffset = 0;
+    syncCorrectionInProgress = false;
   };
 };
 
@@ -242,14 +346,24 @@ function sendControl(type) {
     appendLog("!", "Not connected");
     return;
   }
+  const offset =
+    audioEl && audioEl.currentTime !== undefined && audioEl.currentTime !== null
+      ? audioEl.currentTime
+      : parseFloat($("offsetSec").value || "0") || 0;
   const msg = {
     type,
     track_id: $("trackId").value || null,
-    offset_sec: parseFloat($("offsetSec").value || "0") || 0,
+    offset_sec: offset,
     timestamp: Date.now() / 1000,
   };
   ws.send(JSON.stringify(msg));
   appendLog("→", msg);
+
+  if (type === "PLAY" && currentRole === "host") {
+    startHostPositionBroadcast();
+  } else if (type === "PAUSE" && currentRole === "host") {
+    stopHostPositionBroadcast();
+  }
 }
 
 playBtn.onclick = () => sendControl("PLAY");
@@ -394,8 +508,114 @@ let manualPaused = false;
 let mediaObjectUrl = null;
 let playAuthorized = false; // controlled by WS STATE from host
 
+// Sync state
+let syncLatency = 0; // Estimated one-way latency in seconds
+let syncLatencySamples = []; // Samples for latency estimation
+let lastSyncTimestamp = 0; // Last sync timestamp from host
+let syncTimer = null; // Periodic sync timer
+let lastHostOffset = 0; // Last known host offset
+let syncDriftThreshold = 0.1; // 100ms drift threshold for correction
+let syncCorrectionInProgress = false; // Flag to prevent multiple simultaneous corrections
+
 function setPlayerStatus(text) {
   if (playerStatus) playerStatus.textContent = text;
+}
+
+// Periodic synchronization functions
+function startPeriodicSync() {
+  if (syncTimer) return; // Already running
+  // Check for drift every 1 second
+  syncTimer = setInterval(() => {
+    if (!audioEl || !playAuthorized || audioEl.paused) return;
+    if (syncCorrectionInProgress) return;
+
+    const currentPos = audioEl.currentTime || 0;
+    const now = Date.now() / 1000;
+
+    // Estimate where host should be based on last known position and time elapsed
+    if (lastSyncTimestamp > 0 && lastHostOffset >= 0) {
+      const timeSinceSync = now - lastSyncTimestamp;
+      const estimatedHostPos = lastHostOffset + timeSinceSync;
+      const drift = Math.abs(currentPos - estimatedHostPos);
+
+      // Only correct if drift exceeds threshold
+      if (drift > syncDriftThreshold) {
+        // Use gradual correction for small drift, immediate for large
+        const correctionAmount = drift > 0.5 ? drift : drift * 0.3; // Gradual correction
+        const targetPos =
+          currentPos < estimatedHostPos
+            ? currentPos + correctionAmount
+            : currentPos - correctionAmount;
+
+        try {
+          const buffered = audioEl.buffered;
+          let canSeek = false;
+          for (let i = 0; i < buffered.length; i++) {
+            const start = buffered.start(i);
+            const end = buffered.end(i);
+            if (targetPos >= start && targetPos <= end) {
+              canSeek = true;
+              break;
+            }
+          }
+
+          if (canSeek) {
+            syncCorrectionInProgress = true;
+            audioEl.currentTime = targetPos;
+            setTimeout(() => {
+              syncCorrectionInProgress = false;
+            }, 100);
+            if (drift > 0.2) {
+              appendLog(
+                "ℹ",
+                `Periodic sync: corrected drift ${drift.toFixed(2)}s`
+              );
+            }
+          }
+        } catch (e) {
+          syncCorrectionInProgress = false;
+        }
+      }
+    }
+  }, 1000);
+}
+
+function stopPeriodicSync() {
+  if (syncTimer) {
+    clearInterval(syncTimer);
+    syncTimer = null;
+  }
+}
+
+// Host: Broadcast position periodically
+let hostPositionTimer = null;
+function startHostPositionBroadcast() {
+  if (hostPositionTimer || currentRole !== "host") return;
+  // Broadcast position every 1-2 seconds when playing
+  hostPositionTimer = setInterval(() => {
+    if (!audioEl || !playAuthorized || audioEl.paused) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const currentPos = audioEl.currentTime || 0;
+    const msg = {
+      type: "PLAY",
+      track_id: $("trackId").value || null,
+      offset_sec: currentPos,
+      timestamp: Date.now() / 1000,
+    };
+    try {
+      ws.send(JSON.stringify(msg));
+    } catch (e) {
+      appendLog("!", `Position broadcast failed: ${e}`);
+    }
+  }, 1500); // Every 1.5 seconds
+}
+
+function stopHostPositionBroadcast() {
+  if (hostPositionTimer) {
+    clearInterval(hostPositionTimer);
+    hostPositionTimer = null;
+  }
 }
 
 function initMediaSource() {
@@ -425,6 +645,22 @@ function initMediaSource() {
   mediaSource = new MediaSource();
   mediaObjectUrl = URL.createObjectURL(mediaSource);
   audioEl.src = mediaObjectUrl;
+
+  // Host seek to broadcast new positions to sync to
+  if (currentRole === "host") {
+    let lastSeekTime = 0;
+    audioEl.addEventListener("seeked", () => {
+      if (!playAuthorized || audioEl.paused) return;
+      const now = Date.now();
+      if (now - lastSeekTime < 200) return;
+      lastSeekTime = now;
+
+      const currentPos = audioEl.currentTime || 0;
+      sendControl("PLAY");
+      appendLog("ℹ", `Host seeked to ${currentPos.toFixed(2)}s, broadcasting`);
+    });
+  }
+
   mediaSource.addEventListener(
     "sourceopen",
     () => {
