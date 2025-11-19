@@ -372,6 +372,7 @@ connectBtn.onclick = () => {
     stopProgressUpdates();
     stopPeriodicAnnounce();
     stopRequestTimeoutChecker();
+    stopRequestScheduler();
     lastSyncTimestamp = 0;
     lastHostOffset = 0;
     syncCorrectionInProgress = false;
@@ -497,6 +498,26 @@ function stopRequestTimeoutChecker() {
   if (requestTimeoutTimer) {
     clearInterval(requestTimeoutTimer);
     requestTimeoutTimer = null;
+  }
+}
+
+function startRequestScheduler() {
+  if (requestSchedulerTimer) return;
+  // Periodically call scheduleRequests to ensure we're always requesting more chunks
+  requestSchedulerTimer = setInterval(() => {
+    if (pbRecv && pbRecv.haveCount < pbRecv.numChunks) {
+      scheduleRequests();
+    } else if (pbRecv && pbRecv.haveCount >= pbRecv.numChunks) {
+      // All chunks received, stop scheduler
+      stopRequestScheduler();
+    }
+  }, 1000); // Check every second
+}
+
+function stopRequestScheduler() {
+  if (requestSchedulerTimer) {
+    clearInterval(requestSchedulerTimer);
+    requestSchedulerTimer = null;
   }
 }
 
@@ -952,6 +973,7 @@ const requestTimestamps = new Map(); // chunkIndex -> timestamp (ms)
 const requestPeerMap = new Map(); // chunkIndex -> peerId (which peer we requested from)
 let requestTimeoutTimer = null;
 const REQUEST_TIMEOUT_MS = 10000; // 10 seconds
+let requestSchedulerTimer = null; // Periodic scheduler to keep requesting chunks
 let nextToRequest = 0;
 let recvNumChunks = 0;
 let recvChunkSize = 0;
@@ -1079,6 +1101,7 @@ function resetP2P() {
   peersByChunk = [];
   stopPeriodicAnnounce();
   stopRequestTimeoutChecker();
+  stopRequestScheduler();
 }
 
 function sendSignal(to, blob) {
@@ -1295,6 +1318,8 @@ function handleDCText(text, channel, peerId) {
       announceNow();
       // Start timeout checker for stuck requests
       startRequestTimeoutChecker();
+      // Start periodic request scheduler to keep downloading
+      startRequestScheduler();
       // Kick off requests
       appendLog("ℹ", `Starting chunk requests...`);
       scheduleRequests();
@@ -1584,6 +1609,15 @@ function scheduleRequests() {
     if (totalInflight >= inflightMax * availablePeers.length) {
       break;
     }
+  }
+
+  // Debug logging every 10 calls
+  if (Math.random() < 0.1 || issued === 0) {
+    const totalInflight = Array.from(inflightByPeer.values()).reduce((sum, val) => sum + val, 0);
+    appendLog(
+      "ℹ",
+      `Schedule: phase=${phase}, have=${pbRecv.haveCount}/${numChunks}, candidates=${candidates.length}, issued=${issued}, inflight=${totalInflight}, peers=${availablePeers.length}`
+    );
   }
 
   if (issued === 0 && candidates.length > 0 && availablePeers.length === 0) {
