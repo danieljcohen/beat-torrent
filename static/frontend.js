@@ -53,18 +53,18 @@ if (consoleToggle) {
 // Progress bar update function
 function updateProgressDisplay() {
   if (!audioEl) return;
-  
+
   const currentPos = audioEl.currentTime || 0;
   const duration = audioEl.duration;
-  
+
   // Update time display
   if (currentTime) {
     const formatTime = (seconds) => {
       const mins = Math.floor(seconds / 60);
       const secs = Math.floor(seconds % 60);
-      return `${mins}:${secs.toString().padStart(2, '0')}`;
+      return `${mins}:${secs.toString().padStart(2, "0")}`;
     };
-    
+
     // Only show duration if it's a valid number
     if (duration && isFinite(duration) && duration > 0) {
       currentTime.textContent = `${formatTime(currentPos)} / ${formatTime(duration)}`;
@@ -72,7 +72,7 @@ function updateProgressDisplay() {
       currentTime.textContent = formatTime(currentPos);
     }
   }
-  
+
   // Update progress bar
   if (progressBar && duration && isFinite(duration) && duration > 0) {
     const percent = (currentPos / duration) * 100;
@@ -106,7 +106,7 @@ function appendLog(direction, payload) {
   pre.textContent = `[${now()}] ${direction} ${text}`;
   logBox.appendChild(pre);
   logBox.scrollTop = logBox.scrollHeight;
-  
+
   // Also log to console for debugging
   console.log(`${direction} ${text}`);
 }
@@ -118,7 +118,7 @@ function setConnected(connected) {
     statusPill.classList.remove("bad");
     connectBtn.disabled = true;
     disconnectBtn.disabled = false;
-    
+
     // Show host controls only for host role
     if (currentRole === "host" && hostControls) {
       hostControls.style.display = "block";
@@ -131,7 +131,7 @@ function setConnected(connected) {
     statusPill.classList.remove("ok");
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
-    
+
     if (hostControls) {
       hostControls.style.display = "none";
     }
@@ -168,23 +168,19 @@ connectBtn.onclick = () => {
     try {
       const msg = JSON.parse(ev.data);
       // Log incoming messages (except frequent position updates)
-      if (msg.type !== "STATE" || !msg.payload || msg.payload.status !== "PLAY" || Math.random() < 0.1) {
-        appendLog("←", typeof ev.data === "string" ? ev.data : JSON.stringify(msg));
+      if (
+        msg.type !== "STATE" ||
+        !msg.payload ||
+        msg.payload.status !== "PLAY" ||
+        Math.random() < 0.1
+      ) {
+        appendLog(
+          "←",
+          typeof ev.data === "string" ? ev.data : JSON.stringify(msg)
+        );
       }
       if (msg.type === "STATE") {
         const p = msg.payload || {};
-        
-        // latency estimation
-        if (p.timestamp && typeof p.timestamp === "number") {
-          const receiveTime = Date.now() / 1000;
-          const oneWayLatency = Math.max(0, (receiveTime - p.timestamp) / 2);
-          syncLatencySamples.push(oneWayLatency);
-          if (syncLatencySamples.length > 10) {
-            syncLatencySamples.shift();
-          }
-          const sorted = [...syncLatencySamples].sort((a, b) => a - b);
-          syncLatency = sorted[Math.floor(sorted.length / 2)];
-        }
 
         // Host broadcasts control, all clients honor it
         playAuthorized = p.status === "PLAY";
@@ -226,7 +222,10 @@ connectBtn.onclick = () => {
 
                 if (canSeek || currentPos === 0) {
                   audioEl.currentTime = targetPosition;
-                  appendLog("ℹ", `Synced to position ${targetPosition.toFixed(2)}s (drift was ${drift.toFixed(2)}s)`);
+                  appendLog(
+                    "ℹ",
+                    `Synced to position ${targetPosition.toFixed(2)}s (drift was ${drift.toFixed(2)}s)`
+                  );
                 }
               } catch (e) {
                 appendLog("!", `Sync seek failed: ${e}`);
@@ -360,15 +359,16 @@ connectBtn.onclick = () => {
       graph.removePeer(myPeerId);
     }
     graph.reset();
-    appendLog("!", `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`);
+    appendLog(
+      "!",
+      `WebSocket closed (${ev.code}${ev.reason ? ": " + ev.reason : ""})`
+    );
     setConnected(false);
 
     // reset sync state
     stopPeriodicSync();
     stopHostPositionBroadcast();
     stopProgressUpdates();
-    syncLatency = 0;
-    syncLatencySamples = [];
     lastSyncTimestamp = 0;
     lastHostOffset = 0;
     syncCorrectionInProgress = false;
@@ -411,8 +411,10 @@ function sendControl(type) {
     appendLog("!", "Not connected");
     return;
   }
-  const offset = audioEl && audioEl.currentTime !== undefined && audioEl.currentTime !== null
-      ? audioEl.currentTime : 0;
+  const offset =
+    audioEl && audioEl.currentTime !== undefined && audioEl.currentTime !== null
+      ? audioEl.currentTime
+      : 0;
   const msg = {
     type,
     track_id: "t1",
@@ -516,8 +518,6 @@ let mediaObjectUrl = null;
 let playAuthorized = false; // controlled by WS STATE from host
 
 // Sync state
-let syncLatency = 0; // Estimated one-way latency in seconds
-let syncLatencySamples = []; // Samples for latency estimation
 let lastSyncTimestamp = 0; // Last sync timestamp from host
 let syncTimer = null; // Periodic sync timer
 let lastHostOffset = 0; // Last known host offset
@@ -573,7 +573,10 @@ function startPeriodicSync() {
               syncCorrectionInProgress = false;
             }, 100);
             if (drift > 0.2) {
-              appendLog("ℹ", `Periodic sync: corrected drift ${drift.toFixed(2)}s`);
+              appendLog(
+                "ℹ",
+                `Periodic sync: corrected drift ${drift.toFixed(2)}s`
+              );
             }
           }
         } catch (e) {
@@ -581,7 +584,7 @@ function startPeriodicSync() {
         }
       }
     }
-  }, 20);
+  }, 500);
 }
 
 function stopPeriodicSync() {
@@ -649,21 +652,6 @@ function initMediaSource() {
   mediaSource = new MediaSource();
   mediaObjectUrl = URL.createObjectURL(mediaSource);
   audioEl.src = mediaObjectUrl;
-
-  // Host seek to broadcast new positions to sync to
-  if (currentRole === "host") {
-    let lastSeekTime = 0;
-    audioEl.addEventListener("seeked", () => {
-      if (!playAuthorized || audioEl.paused) return;
-      const now = Date.now();
-      if (now - lastSeekTime < 200) return;
-      lastSeekTime = now;
-
-      const currentPos = audioEl.currentTime || 0;
-      sendControl("PLAY");
-      appendLog("ℹ", `Host seeked to ${currentPos.toFixed(2)}s, broadcasting`);
-    });
-  }
 
   mediaSource.addEventListener(
     "sourceopen",
@@ -796,9 +784,10 @@ function startAppendLoop() {
 // Auto-load MP3 when file is selected
 if (fileInput) {
   fileInput.onchange = async () => {
-    const file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    const file =
+      fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
     if (!file) return;
-    
+
     const cSize = 4096; // Fixed chunk size
     try {
       setPlayerStatus("reading file...");
@@ -821,8 +810,11 @@ if (fileInput) {
       }
       pbActive = pbHost;
       currentTrackName = file.name;
-      appendLog("ℹ", `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`);
-      
+      appendLog(
+        "ℹ",
+        `Loaded ${file.name} (${fileSizeBytes} bytes) into RAM as ${nChunks} chunks`
+      );
+
       // Update track name immediately
       if (trackName) {
         trackName.textContent = currentTrackName;
@@ -856,18 +848,22 @@ if (fileInput) {
         }
         appendLog("ℹ", "Sent TRACK_META to open peers");
       } catch (_) {}
-      
+
       // Announce to tracker
       announceNow();
-      
+
       initMediaSource();
       startAppendLoop();
-      
+
       // Wait for audio element to have duration, then update display
       if (audioEl) {
-        audioEl.addEventListener('loadedmetadata', () => {
-          updateProgressDisplay();
-        }, { once: true });
+        audioEl.addEventListener(
+          "loadedmetadata",
+          () => {
+            updateProgressDisplay();
+          },
+          {once: true}
+        );
       }
     } catch (e) {
       setPlayerStatus(`load error: ${e && e.message ? e.message : e}`);
@@ -1124,7 +1120,10 @@ function wireDataChannel(channel, peerId) {
     broadcastGraphConnection(myId, peerId, false);
   };
   channel.onerror = (e) =>
-    appendLog("!", `datachannel error (${peerId}) ${e && e.message ? e.message : ""}`);
+    appendLog(
+      "!",
+      `datachannel error (${peerId}) ${e && e.message ? e.message : ""}`
+    );
   channel.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       handleDCText(ev.data, channel, peerId);
@@ -1154,7 +1153,10 @@ function handleDCText(text, channel, peerId) {
       pbRecv = new PeerBuffer(recvNumChunks, recvChunkSize);
       pbActive = pbRecv;
       fileSizeBytes = total;
-      appendLog("ℹ", `Received TRACK_META: ${recvNumChunks} chunks, ${recvChunkSize} bytes/chunk, ${total} total bytes`);
+      appendLog(
+        "ℹ",
+        `Received TRACK_META: ${recvNumChunks} chunks, ${recvChunkSize} bytes/chunk, ${total} total bytes`
+      );
       if (trackName) {
         trackName.textContent = "Receiving track...";
       }
@@ -1185,7 +1187,8 @@ function handleDCText(text, channel, peerId) {
       try {
         channel.send(JSON.stringify(header));
         channel.send(payload);
-        if (idx % 50 === 0) { // Log every 50th chunk to avoid spam
+        if (idx % 50 === 0) {
+          // Log every 50th chunk to avoid spam
           appendLog("ℹ", `Sent chunk ${idx}/${pbHost.numChunks} to ${peerId}`);
         }
       } catch (e) {
@@ -1226,7 +1229,10 @@ function handleDCBinary(bytes, channel, peerId) {
   const {index, length} = pendingDataHeader;
   pendingDataHeader = null;
   if (bytes.length !== length) {
-    appendLog("!", `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`);
+    appendLog(
+      "!",
+      `DATA length mismatch idx=${index} got=${bytes.length} expected=${length}`
+    );
     return;
   }
   // Ensure chunk is chunkSize, pad if needed
@@ -1238,8 +1244,12 @@ function handleDCBinary(bytes, channel, peerId) {
   }
   pbRecv.setChunk(index, payload);
   inflight = Math.max(0, inflight - 1);
-  if (index % 50 === 0) { // Log every 50th chunk to avoid spam
-    appendLog("ℹ", `Received chunk ${index}/${pbRecv.numChunks} (${pbRecv.haveCount} total)`);
+  if (index % 50 === 0) {
+    // Log every 50th chunk to avoid spam
+    appendLog(
+      "ℹ",
+      `Received chunk ${index}/${pbRecv.numChunks} (${pbRecv.haveCount} total)`
+    );
   }
   scheduleRequests();
   // Throttle broadcast of updated HAVE bitmap
@@ -1300,14 +1310,18 @@ function choosePeerForChunk(availablePeers, chunkIndex) {
 function sendRequest(peerId, chunkIndex) {
   const ch = dcByPeer.get(peerId);
   if (!ch || ch.readyState !== "open") {
-    appendLog("!", `Cannot request chunk ${chunkIndex}: channel to ${peerId} not ready`);
+    appendLog(
+      "!",
+      `Cannot request chunk ${chunkIndex}: channel to ${peerId} not ready`
+    );
     return false;
   }
   const msg = {t: "REQUEST", index: chunkIndex};
   try {
     ch.send(JSON.stringify(msg));
     inflight++;
-    if (chunkIndex === 0 || chunkIndex % 100 === 0) { // Log first and every 100th
+    if (chunkIndex === 0 || chunkIndex % 100 === 0) {
+      // Log first and every 100th
       appendLog("ℹ", `Requesting chunk ${chunkIndex} from ${peerId}`);
     }
     return true;
@@ -1416,9 +1430,12 @@ function scheduleRequests() {
       issued++;
     }
   }
-  
+
   if (issued === 0 && candidates.length > 0 && availablePeers.length === 0) {
-    appendLog("!", `No peers available to request chunks from! Need P2P connections.`);
+    appendLog(
+      "!",
+      `No peers available to request chunks from! Need P2P connections.`
+    );
   }
 }
 
