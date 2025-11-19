@@ -37,6 +37,7 @@ participants: Set[WebSocket] = set()
 host_id: Optional[int] = None
 peer_id_by_ws: dict[WebSocket, str] = {}
 ws_by_peer_id: dict[str, WebSocket] = {} #support for multiple rooms (tho not yet implemented)
+display_name_by_peer_id: dict[str, str] = {} # Track display names for each peer
 
 # shared state
 state = {
@@ -117,6 +118,7 @@ async def ws_jam1(websocket: WebSocket):
     my_peer_id = generate_peer_id()
     peer_id_by_ws[websocket] = my_peer_id
     ws_by_peer_id[my_peer_id] = websocket
+    display_name_by_peer_id[my_peer_id] = display_name
     await websocket.send_text(json.dumps({"type": "PEER", "peer_id": my_peer_id}))
 
     # Send initial STATE immediately
@@ -133,6 +135,7 @@ async def ws_jam1(websocket: WebSocket):
                     "ip": meta.get("ip"),
                     "port": meta.get("port"),
                     "have_count": int(meta.get("have_count") or 0),
+                    "display_name": display_name_by_peer_id.get(pid, "Unknown"),
                 })
         print(f"push_peers_to_room: room={room}, swarm has {len(full)} peers")
         # Push to ALL connected peers (not just those in swarm)
@@ -223,7 +226,13 @@ async def ws_jam1(websocket: WebSocket):
                     if pid == caller_id:
                         continue
                     if "port" in meta:
-                        peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
+                        peers.append({
+                            "peer_id": pid,
+                            "ip": meta["ip"],
+                            "port": meta["port"],
+                            "have_count": int(meta.get("have_count") or 0),
+                            "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                        })
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
                 # Broadcast updated peers to everyone in the room
@@ -253,7 +262,13 @@ async def ws_jam1(websocket: WebSocket):
                     if pid == caller_id:
                         continue
                     if "port" in meta:
-                        peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
+                        peers.append({
+                            "peer_id": pid,
+                            "ip": meta["ip"],
+                            "port": meta["port"],
+                            "have_count": int(meta.get("have_count") or 0),
+                            "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                        })
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
                 # Broadcast updated peers to everyone in the room
@@ -269,6 +284,7 @@ async def ws_jam1(websocket: WebSocket):
         pid = peer_id_by_ws.pop(websocket, None)
         if pid:
             ws_by_peer_id.pop(pid, None)
+            display_name_by_peer_id.pop(pid, None)
             # Remove from any swarm
             for track_id, swarm in list(swarms.items()):
                 if pid in swarm:
@@ -307,7 +323,13 @@ async def cleanup_swarms_task():
             full_list = []
             for pid, meta in swarm.items():
                 if "port" in meta:
-                    full_list.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
+                    full_list.append({
+                        "peer_id": pid,
+                        "ip": meta["ip"],
+                        "port": meta["port"],
+                        "have_count": int(meta.get("have_count") or 0),
+                        "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                    })
             for pid in peer_ids:
                 ws = ws_by_peer_id.get(pid)
                 if not ws:

@@ -142,12 +142,15 @@ function setConnected(connected) {
   }
 }
 
+let myDisplayName = "User";
+
 connectBtn.onclick = () => {
   const url = $("wsUrl").value.trim();
   const role = [...document.querySelectorAll('input[name="role"]')].find(
     (r) => r.checked
   ).value;
   const displayName = $("displayName").value.trim() || "User";
+  myDisplayName = displayName;
   currentRole = role;
 
   appendLog("→", `Connecting to ${url} ...`);
@@ -268,7 +271,10 @@ connectBtn.onclick = () => {
       } else if (msg.type === "PEER") {
         if (msg.peer_id) {
           myPeerId = msg.peer_id;
-          graph.addOrUpdatePeer(msg.peer_id, {isHost: currentRole === "host"});
+          graph.addOrUpdatePeer(msg.peer_id, {
+            isHost: currentRole === "host",
+            displayName: myDisplayName,
+          });
         }
       } else if (msg.type === "PEERS") {
         lastPeers = msg.peers || [];
@@ -279,6 +285,7 @@ connectBtn.onclick = () => {
               ip: p.ip,
               port: p.port,
               have: p.have_count,
+              displayName: p.display_name,
             });
           });
         } catch (_) {}

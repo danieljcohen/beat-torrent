@@ -51,6 +51,9 @@
     .attr("stroke", "#fff")
     .attr("stroke-width", 1.5)
     .selectAll("circle");
+  let textEl = svg
+    .append("g")
+    .selectAll("text");
 
   function updateGraph() {
     const nodes = Array.from(state.nodes.values());
@@ -77,6 +80,20 @@
       .on("mouseout", handleNodeOut)
       .merge(nodeEl);
 
+    textEl = textEl.data(nodes, (d) => d.id);
+    textEl.exit().remove();
+    textEl = textEl
+      .enter()
+      .append("text")
+      .attr("text-anchor", "middle")
+      .attr("dy", "25")
+      .attr("fill", "#333")
+      .attr("font-size", "11px")
+      .attr("font-weight", "bold")
+      .style("pointer-events", "none")
+      .merge(textEl)
+      .text((d) => d.displayName || d.id.substring(0, 6));
+
     simulation.nodes(nodes).on("tick", () => {
       linkEl
         .attr("x1", (d) => d.source.x)
@@ -85,6 +102,8 @@
         .attr("y2", (d) => d.target.y);
 
       nodeEl.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
+      
+      textEl.attr("x", (d) => d.x).attr("y", (d) => d.y);
     });
 
     simulation.force("link").links(links);
@@ -103,6 +122,7 @@
     if (meta.ip !== undefined) existing.ip = meta.ip;
     if (meta.port !== undefined) existing.port = meta.port;
     if (meta.have !== undefined) existing.have = meta.have;
+    if (meta.displayName !== undefined) existing.displayName = meta.displayName;
     state.nodes.set(peerId, existing);
     updateGraph();
   }
@@ -148,9 +168,11 @@
   }
 
   function tooltipHtml(d) {
-    let html = `<b>${d.isHost ? "HOST" : "Peer"}</b><br><b>ID:</b> ${d.id}<br>`;
+    let html = `<b>${d.isHost ? "HOST" : "Peer"}</b><br>`;
+    if (d.displayName) html += `<b>Name:</b> ${d.displayName}<br>`;
+    html += `<b>ID:</b> ${d.id}<br>`;
     if (d.ip) html += `<b>IP:</b> ${d.ip}<br>`;
-    if (d.port) html += `<b>Port:</b> ${d.port}<br>`;
+    if (d.port !== undefined) html += `<b>Port:</b> ${d.port}<br>`;
     if (d.have !== undefined) html += `<b>Have:</b> ${d.have}<br>`;
     return html;
   }
