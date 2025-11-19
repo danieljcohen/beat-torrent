@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Optional, Set, Dict, Any
 
@@ -122,7 +123,22 @@ async def ws_jam1(websocket: WebSocket):
     display_name_by_peer_id[my_peer_id] = display_name
     if is_host:
         host_peer_id = my_peer_id
+    
+    # Send peer ID
     await websocket.send_text(json.dumps({"type": "PEER", "peer_id": my_peer_id}))
+    
+    # Optionally send TURN server configuration if available
+    # Set these as environment variables: TURN_SERVER_URL, TURN_SERVER_USERNAME, TURN_SERVER_CREDENTIAL
+    turn_url = os.getenv("TURN_SERVER_URL")
+    turn_username = os.getenv("TURN_SERVER_USERNAME")
+    turn_credential = os.getenv("TURN_SERVER_CREDENTIAL")
+    if turn_url and turn_username and turn_credential:
+        await websocket.send_text(json.dumps({
+            "type": "TURN_CONFIG",
+            "url": turn_url,
+            "username": turn_username,
+            "credential": turn_credential,
+        }))
 
     # Send initial STATE immediately
     await websocket.send_text(json.dumps({"type": "STATE", "payload": state}))

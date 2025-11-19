@@ -106,9 +106,6 @@ function appendLog(direction, payload) {
   pre.textContent = `[${now()}] ${direction} ${text}`;
   logBox.appendChild(pre);
   logBox.scrollTop = logBox.scrollHeight;
-
-  // Also log to console for debugging
-  console.log(`${direction} ${text}`);
 }
 
 function setConnected(connected) {
@@ -274,6 +271,17 @@ connectBtn.onclick = () => {
             isHost: currentRole === "host",
             displayName: myDisplayName,
           });
+        }
+      } else if (msg.type === "TURN_CONFIG") {
+        // Update RTC config with server-provided TURN server
+        if (msg.url && msg.username && msg.credential) {
+          window.TURN_SERVER_URL = msg.url;
+          window.TURN_SERVER_USERNAME = msg.username;
+          window.TURN_SERVER_CREDENTIAL = msg.credential;
+          // Update global RTC config for future connections
+          rtcConfig = getRTCConfig();
+          appendLog("ℹ", `Received TURN server config: ${msg.url}`);
+          appendLog("ℹ", "New connections will use this TURN server");
         }
       } else if (msg.type === "PEERS") {
         lastPeers = msg.peers || [];
@@ -593,7 +601,7 @@ let playAuthorized = false; // controlled by WS STATE from host
 let lastSyncTimestamp = 0; // Last sync timestamp from host
 let syncTimer = null; // Periodic sync timer
 let lastHostOffset = 0; // Last known host offset
-let syncDriftThreshold = 0.1; // 100ms drift threshold for correction
+let syncDriftThreshold = 0.25; // 100ms drift threshold for correction
 let syncCorrectionInProgress = false; // Flag to prevent multiple simultaneous corrections
 
 function setPlayerStatus(text) {
@@ -905,7 +913,6 @@ if (fileInput) {
       // Update track name immediately
       if (trackName) {
         trackName.textContent = currentTrackName;
-        console.log("Set track name to:", currentTrackName);
       }
       // Initialize availability tables for host
       initPeersByChunk(nChunks);
@@ -960,7 +967,65 @@ if (fileInput) {
 }
 
 // WebRTC DataChannel P2P for chunk transfer
-const rtcConfig = {iceServers: [{urls: ["stun:stun.l.google.com:19302"]}]};
+// TURN server configuration - supports both public and custom TURN servers
+// For production, you should use your own TURN server (see README for setup)
+
+// Global RTC config that can be updated dynamically
+let rtcConfig = null;
+
+function getRTCConfig() {
+  const iceServers = [
+    // STUN servers (for NAT discovery)
+    {urls: ["stun:stun.l.google.com:19302"]},
+    {urls: ["stun:stun1.l.google.com:19302"]},
+  ];
+
+  // Check for custom TURN server configuration
+  // You can set these via window.TURN_* variables before the script loads
+  // or configure them in the HTML/backend
+  const customTurnUrl = window.TURN_SERVER_URL || null;
+  const customTurnUsername = window.TURN_SERVER_USERNAME || null;
+  const customTurnCredential = window.TURN_SERVER_CREDENTIAL || null;
+
+  if (customTurnUrl && customTurnUsername && customTurnCredential) {
+    // Use custom TURN server
+    iceServers.push({
+      urls: [customTurnUrl],
+      username: customTurnUsername,
+      credential: customTurnCredential,
+    });
+    console.log("Using custom TURN server:", customTurnUrl);
+  } else {
+    // Use free public TURN servers (may have rate limits)
+    // Note: These are public services and may not be reliable for production
+    // For production, use a self-hosted TURN server
+    iceServers.push(
+      {
+        urls: ["turn:openrelay.metered.ca:80"],
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+      {
+        urls: ["turn:openrelay.metered.ca:443"],
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+      {
+        urls: ["turn:openrelay.metered.ca:443?transport=tcp"],
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      }
+    );
+    console.log(
+      "Using public TURN servers (consider configuring custom TURN for production)"
+    );
+  }
+
+  return {iceServers};
+}
+
+// Initialize RTC config
+rtcConfig = getRTCConfig();
 // Per-peer connections/channels
 const pcByPeer = new Map();
 const dcByPeer = new Map();
@@ -1141,13 +1206,36 @@ async function createPeerConnection(toPeerId, isInitiator) {
   }
   const pc = new RTCPeerConnection(rtcConfig);
   pcByPeer.set(toPeerId, pc);
+
+  // Enhanced ICE candidate logging
   pc.onicecandidate = (e) => {
     if (e.candidate) {
+      const candidateType = e.candidate.type; // host, srflx, relay
+      const candidateProtocol = e.candidate.protocol; // udp, tcp
+      if (candidateType === "relay") {
+        appendLog("ℹ", `ICE relay candidate for ${toPeerId} (using TURN)`);
+      }
       sendSignal(toPeerId, {wrtc: "ice", candidate: e.candidate});
+    } else {
+      appendLog("ℹ", `ICE gathering complete for ${toPeerId}`);
     }
   };
+
+  // Enhanced connection state logging
+  pc.oniceconnectionstatechange = () => {
+    const state = pc.iceConnectionState;
+    appendLog("ℹ", `ICE(${toPeerId}): ${state}`);
+    if (state === "failed" || state === "disconnected") {
+      appendLog(
+        "!",
+        `ICE connection ${state} for ${toPeerId} - may need TURN server`
+      );
+    }
+  };
+
   pc.onconnectionstatechange = () => {
-    appendLog("ℹ", `pc(${toPeerId}) state=${pc.connectionState}`);
+    const state = pc.connectionState;
+    appendLog("ℹ", `pc(${toPeerId}) state=${state}`);
     if (
       pc.connectionState === "closed" ||
       pc.connectionState === "failed" ||
@@ -1169,7 +1257,10 @@ async function createPeerConnection(toPeerId, isInitiator) {
       // Clean up per-peer inflight tracking
       const lostInflight = inflightByPeer.get(toPeerId) || 0;
       if (lostInflight > 0) {
-        appendLog("ℹ", `Lost ${lostInflight} inflight requests to ${toPeerId}, will retry`);
+        appendLog(
+          "ℹ",
+          `Lost ${lostInflight} inflight requests to ${toPeerId}, will retry`
+        );
         // Clear requests sent to this peer so they can be re-requested from other peers
         const chunksToRetry = [];
         for (const [chunkIdx, peerId] of requestPeerMap.entries()) {
@@ -1220,23 +1311,23 @@ function wireDataChannel(channel, peerId) {
     graph.addLink(myId, peerId);
     // Broadcast this connection to all other peers so they can update their graphs
     broadcastGraphConnection(myId, peerId, true);
-    
+
     // Initialize per-peer tracking
     if (!inflightByPeer.has(peerId)) {
       inflightByPeer.set(peerId, 0);
     }
-    
+
     if (primaryUpstreamPeerId === null) {
       primaryUpstreamPeerId = peerId;
     }
-    
+
     const numChunks = currentNumChunks();
-    
+
     // Initialize HAVE bitmap for this peer if we know the chunk count
     if (numChunks > 0 && !haveBitmapByPeer.has(peerId)) {
       haveBitmapByPeer.set(peerId, new Array(numChunks).fill(0));
     }
-    
+
     // If we are the host (have pbHost loaded), send TRACK_META
     if (pbHost && channel.readyState === "open") {
       const meta = {
@@ -1393,16 +1484,16 @@ function handleDCBinary(bytes, channel, peerId) {
     payload = padded;
   }
   pbRecv.setChunk(index, payload);
-  
+
   // Decrement per-peer inflight counter
   const currentInflight = inflightByPeer.get(peerId) || 0;
   inflightByPeer.set(peerId, Math.max(0, currentInflight - 1));
-  
+
   // Remove from globally requested chunks, timestamp, and peer map since we received it
   requestedChunks.delete(index);
   requestTimestamps.delete(index);
   requestPeerMap.delete(index);
-  
+
   if (index % 50 === 0) {
     // Log every 50th chunk to avoid spam
     appendLog(
@@ -1475,18 +1566,18 @@ function sendRequest(peerId, chunkIndex) {
     );
     return false;
   }
-  
+
   // Check if we've already requested this chunk
   if (requestedChunks.has(chunkIndex)) {
     return false;
   }
-  
+
   // Check per-peer inflight limit
   const currentInflight = inflightByPeer.get(peerId) || 0;
   if (currentInflight >= inflightMax) {
     return false;
   }
-  
+
   const msg = {t: "REQUEST", index: chunkIndex};
   try {
     ch.send(JSON.stringify(msg));
@@ -1496,7 +1587,10 @@ function sendRequest(peerId, chunkIndex) {
     requestPeerMap.set(chunkIndex, peerId);
     if (chunkIndex === 0 || chunkIndex % 100 === 0) {
       // Log first and every 100th
-      appendLog("ℹ", `Requesting chunk ${chunkIndex} from ${peerId} (inflight: ${currentInflight + 1})`);
+      appendLog(
+        "ℹ",
+        `Requesting chunk ${chunkIndex} from ${peerId} (inflight: ${currentInflight + 1})`
+      );
     }
     return true;
   } catch (e) {
@@ -1603,9 +1697,12 @@ function scheduleRequests() {
     if (selectedPeer && sendRequest(selectedPeer.pid, idx)) {
       issued++;
     }
-    
+
     // Stop if we've issued enough requests (total across all peers)
-    const totalInflight = Array.from(inflightByPeer.values()).reduce((sum, val) => sum + val, 0);
+    const totalInflight = Array.from(inflightByPeer.values()).reduce(
+      (sum, val) => sum + val,
+      0
+    );
     if (totalInflight >= inflightMax * availablePeers.length) {
       break;
     }
@@ -1613,7 +1710,10 @@ function scheduleRequests() {
 
   // Debug logging every 10 calls
   if (Math.random() < 0.1 || issued === 0) {
-    const totalInflight = Array.from(inflightByPeer.values()).reduce((sum, val) => sum + val, 0);
+    const totalInflight = Array.from(inflightByPeer.values()).reduce(
+      (sum, val) => sum + val,
+      0
+    );
     appendLog(
       "ℹ",
       `Schedule: phase=${phase}, have=${pbRecv.haveCount}/${numChunks}, candidates=${candidates.length}, issued=${issued}, inflight=${totalInflight}, peers=${availablePeers.length}`
