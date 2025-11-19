@@ -285,6 +285,7 @@ connectBtn.onclick = () => {
               port: p.port,
               have: p.have_count,
               displayName: p.display_name,
+              isHost: !!p.is_host,
             });
           });
         } catch (_) {}
@@ -652,6 +653,21 @@ function initMediaSource() {
   mediaSource = new MediaSource();
   mediaObjectUrl = URL.createObjectURL(mediaSource);
   audioEl.src = mediaObjectUrl;
+
+  // Host seek to broadcast new positions to sync to
+  if (currentRole === "host") {
+    let lastSeekTime = 0;
+    audioEl.addEventListener("seeked", () => {
+      if (!playAuthorized || audioEl.paused) return;
+      const now = Date.now();
+      if (now - lastSeekTime < 200) return;
+      lastSeekTime = now;
+
+      const currentPos = audioEl.currentTime || 0;
+      sendControl("PLAY");
+      appendLog("ℹ", `Host seeked to ${currentPos.toFixed(2)}s, broadcasting`);
+    });
+  }
 
   mediaSource.addEventListener(
     "sourceopen",

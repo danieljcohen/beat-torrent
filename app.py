@@ -35,6 +35,7 @@ def check_host(room_name: str):
 
 participants: Set[WebSocket] = set()
 host_id: Optional[int] = None
+host_peer_id: Optional[str] = None  # Track host's peer_id for easy lookup
 peer_id_by_ws: dict[WebSocket, str] = {}
 ws_by_peer_id: dict[str, WebSocket] = {} #support for multiple rooms (tho not yet implemented)
 display_name_by_peer_id: dict[str, str] = {} # Track display names for each peer
@@ -99,7 +100,7 @@ async def ws_jam1(websocket: WebSocket):
         return
 
     # Host assignment (only one host allowed)
-    global host_id
+    global host_id, host_peer_id
     is_host = role == "host"
     if is_host:
         if host_id is not None:
@@ -119,6 +120,8 @@ async def ws_jam1(websocket: WebSocket):
     peer_id_by_ws[websocket] = my_peer_id
     ws_by_peer_id[my_peer_id] = websocket
     display_name_by_peer_id[my_peer_id] = display_name
+    if is_host:
+        host_peer_id = my_peer_id
     await websocket.send_text(json.dumps({"type": "PEER", "peer_id": my_peer_id}))
 
     # Send initial STATE immediately
@@ -136,6 +139,7 @@ async def ws_jam1(websocket: WebSocket):
                     "port": meta.get("port"),
                     "have_count": int(meta.get("have_count") or 0),
                     "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                    "is_host": pid == host_peer_id,
                 })
         print(f"push_peers_to_room: room={room}, swarm has {len(full)} peers")
         # Push to ALL connected peers (not just those in swarm)
@@ -232,6 +236,7 @@ async def ws_jam1(websocket: WebSocket):
                             "port": meta["port"],
                             "have_count": int(meta.get("have_count") or 0),
                             "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                            "is_host": pid == host_peer_id,
                         })
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
@@ -268,6 +273,7 @@ async def ws_jam1(websocket: WebSocket):
                             "port": meta["port"],
                             "have_count": int(meta.get("have_count") or 0),
                             "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                            "is_host": pid == host_peer_id,
                         })
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
@@ -294,6 +300,7 @@ async def ws_jam1(websocket: WebSocket):
         if is_host and host_id == id(websocket):
             # Clear host if it was this socket and reset state to PAUSE
             host_id = None
+            host_peer_id = None
             state["status"] = "PAUSE"
             state["offset_sec"] = 0.0
             state["timestamp"] = time.time()
@@ -329,6 +336,7 @@ async def cleanup_swarms_task():
                         "port": meta["port"],
                         "have_count": int(meta.get("have_count") or 0),
                         "display_name": display_name_by_peer_id.get(pid, "Unknown"),
+                        "is_host": pid == host_peer_id,
                     })
             for pid in peer_ids:
                 ws = ws_by_peer_id.get(pid)
