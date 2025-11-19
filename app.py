@@ -127,24 +127,26 @@ async def ws_jam1(websocket: WebSocket):
         # Build full list once
         full = []
         for pid, meta in swarm.items():
-            if meta.get("port"):
+            if "port" in meta:
                 full.append({
                     "peer_id": pid,
                     "ip": meta.get("ip"),
                     "port": meta.get("port"),
                     "have_count": int(meta.get("have_count") or 0),
                 })
-        # Push to each peer (exclude receiver from peers list)
-        for pid in list(swarm.keys()):
-            ws = ws_by_peer_id.get(pid)
+        print(f"push_peers_to_room: room={room}, swarm has {len(full)} peers")
+        # Push to ALL connected peers (not just those in swarm)
+        # This ensures host gets updates even if they haven't announced yet
+        for pid, ws in ws_by_peer_id.items():
             if not ws:
                 continue
             peers = [p for p in full if p["peer_id"] != pid]
             out = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
+            print(f"  Sending PEERS to {pid}: {len(peers)} peers")
             try:
                 await ws.send_text(json.dumps(out))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  Failed to send to {pid}: {e}")
 
     try:
         while True:
@@ -212,7 +214,7 @@ async def ws_jam1(websocket: WebSocket):
                     entry["chunk_size"] = chunk_size
                 swarm[caller_id] = entry
                 try:
-                    print(f"ANNOUNCE room={room} peer={caller_id} ip={ip} port={port} have_count={have_count}")
+                    print(f"ANNOUNCE room={room} peer={caller_id} ip={ip} port={port} have_count={have_count}, swarm now has {len(swarm)} peers")
                 except Exception:
                     pass
                 # Build peers list excluding caller, include have_count
@@ -220,7 +222,7 @@ async def ws_jam1(websocket: WebSocket):
                 for pid, meta in swarm.items():
                     if pid == caller_id:
                         continue
-                    if "ip" in meta and "port" in meta:
+                    if "port" in meta:
                         peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
@@ -250,7 +252,7 @@ async def ws_jam1(websocket: WebSocket):
                 for pid, meta in swarm.items():
                     if pid == caller_id:
                         continue
-                    if "ip" in meta and "port" in meta and meta["port"]:
+                    if "port" in meta:
                         peers.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
                 resp = {"type": "PEERS", "room": room, "peers": peers, "interval_sec": PEERS_INTERVAL_SEC}
                 await websocket.send_text(json.dumps(resp))
@@ -304,7 +306,7 @@ async def cleanup_swarms_task():
             # Build full peers list for this track once
             full_list = []
             for pid, meta in swarm.items():
-                if "ip" in meta and "port" in meta and meta["port"]:
+                if "port" in meta:
                     full_list.append({"peer_id": pid, "ip": meta["ip"], "port": meta["port"], "have_count": int(meta.get("have_count") or 0)})
             for pid in peer_ids:
                 ws = ws_by_peer_id.get(pid)
