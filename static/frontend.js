@@ -370,6 +370,8 @@ connectBtn.onclick = () => {
     stopPeriodicSync();
     stopHostPositionBroadcast();
     stopProgressUpdates();
+    stopPeriodicAnnounce();
+    stopRequestTimeoutChecker();
     lastSyncTimestamp = 0;
     lastHostOffset = 0;
     syncCorrectionInProgress = false;
@@ -448,6 +450,54 @@ function announceNow() {
     have_count: pbHost ? pbHost.haveCount : pbRecv ? pbRecv.haveCount : 0,
   };
   ws.send(JSON.stringify(msg));
+}
+
+function startPeriodicAnnounce() {
+  if (announceTimer) return;
+  // Announce every 10 seconds to keep swarm fresh
+  announceTimer = setInterval(() => {
+    announceNow();
+  }, 10000);
+}
+
+function stopPeriodicAnnounce() {
+  if (announceTimer) {
+    clearInterval(announceTimer);
+    announceTimer = null;
+  }
+}
+
+function startRequestTimeoutChecker() {
+  if (requestTimeoutTimer) return;
+  // Check for timed out requests every 5 seconds
+  requestTimeoutTimer = setInterval(() => {
+    const now = Date.now();
+    const timedOut = [];
+    for (const [chunkIndex, timestamp] of requestTimestamps.entries()) {
+      if (now - timestamp > REQUEST_TIMEOUT_MS) {
+        timedOut.push(chunkIndex);
+      }
+    }
+    if (timedOut.length > 0) {
+      appendLog("!", `${timedOut.length} requests timed out, will retry`);
+      for (const idx of timedOut) {
+        requestedChunks.delete(idx);
+        requestTimestamps.delete(idx);
+        requestPeerMap.delete(idx);
+      }
+      // Trigger new requests
+      if (pbRecv) {
+        scheduleRequests();
+      }
+    }
+  }, 5000);
+}
+
+function stopRequestTimeoutChecker() {
+  if (requestTimeoutTimer) {
+    clearInterval(requestTimeoutTimer);
+    requestTimeoutTimer = null;
+  }
 }
 
 // Track last known peers
@@ -865,8 +915,9 @@ if (fileInput) {
         appendLog("ℹ", "Sent TRACK_META to open peers");
       } catch (_) {}
 
-      // Announce to tracker
+      // Announce to tracker and start periodic announcing
       announceNow();
+      startPeriodicAnnounce();
 
       initMediaSource();
       startAppendLoop();
@@ -894,8 +945,13 @@ const pcByPeer = new Map();
 const dcByPeer = new Map();
 let primaryUpstreamPeerId = null;
 let pendingDataHeader = null; // {index, length}
-let inflight = 0;
-let inflightMax = 8;
+let inflightMax = 8; // Per-peer inflight limit
+const inflightByPeer = new Map(); // peerId -> count of inflight requests
+const requestedChunks = new Set(); // Track globally requested chunks to avoid duplicates
+const requestTimestamps = new Map(); // chunkIndex -> timestamp (ms)
+const requestPeerMap = new Map(); // chunkIndex -> peerId (which peer we requested from)
+let requestTimeoutTimer = null;
+const REQUEST_TIMEOUT_MS = 10000; // 10 seconds
 let nextToRequest = 0;
 let recvNumChunks = 0;
 let recvChunkSize = 0;
@@ -908,6 +964,8 @@ let peersByChunk = []; // Array<Set<peerId>>
 let rrIndex = 0;
 // Throughput tracking
 const throughput = new Map(); // peerId -> {lastTime, lastBytes, rate}
+// Periodic announce timer
+let announceTimer = null;
 
 function currentNumChunks() {
   if (pbHost && Number.isFinite(pbHost.numChunks)) return pbHost.numChunks | 0;
@@ -1010,12 +1068,17 @@ function resetP2P() {
   dcByPeer.clear();
   primaryUpstreamPeerId = null;
   pendingDataHeader = null;
-  inflight = 0;
+  inflightByPeer.clear();
+  requestedChunks.clear();
+  requestTimestamps.clear();
+  requestPeerMap.clear();
   nextToRequest = 0;
   recvNumChunks = 0;
   recvChunkSize = 0;
   haveBitmapByPeer.clear();
   peersByChunk = [];
+  stopPeriodicAnnounce();
+  stopRequestTimeoutChecker();
 }
 
 function sendSignal(to, blob) {
@@ -1080,10 +1143,32 @@ async function createPeerConnection(toPeerId, isInitiator) {
       if (primaryUpstreamPeerId === toPeerId) {
         primaryUpstreamPeerId = null;
       }
+      // Clean up per-peer inflight tracking
+      const lostInflight = inflightByPeer.get(toPeerId) || 0;
+      if (lostInflight > 0) {
+        appendLog("ℹ", `Lost ${lostInflight} inflight requests to ${toPeerId}, will retry`);
+        // Clear requests sent to this peer so they can be re-requested from other peers
+        const chunksToRetry = [];
+        for (const [chunkIdx, peerId] of requestPeerMap.entries()) {
+          if (peerId === toPeerId) {
+            chunksToRetry.push(chunkIdx);
+          }
+        }
+        for (const chunkIdx of chunksToRetry) {
+          requestedChunks.delete(chunkIdx);
+          requestTimestamps.delete(chunkIdx);
+          requestPeerMap.delete(chunkIdx);
+        }
+      }
+      inflightByPeer.delete(toPeerId);
       // Clean up peer availability
       haveBitmapByPeer.delete(toPeerId);
       for (let i = 0; i < peersByChunk.length; i++) {
         peersByChunk[i].delete(toPeerId);
+      }
+      // Trigger new requests since we lost a peer
+      if (pbRecv) {
+        scheduleRequests();
       }
     }
   };
@@ -1112,9 +1197,23 @@ function wireDataChannel(channel, peerId) {
     graph.addLink(myId, peerId);
     // Broadcast this connection to all other peers so they can update their graphs
     broadcastGraphConnection(myId, peerId, true);
+    
+    // Initialize per-peer tracking
+    if (!inflightByPeer.has(peerId)) {
+      inflightByPeer.set(peerId, 0);
+    }
+    
     if (primaryUpstreamPeerId === null) {
       primaryUpstreamPeerId = peerId;
     }
+    
+    const numChunks = currentNumChunks();
+    
+    // Initialize HAVE bitmap for this peer if we know the chunk count
+    if (numChunks > 0 && !haveBitmapByPeer.has(peerId)) {
+      haveBitmapByPeer.set(peerId, new Array(numChunks).fill(0));
+    }
+    
     // If we are the host (have pbHost loaded), send TRACK_META
     if (pbHost && channel.readyState === "open") {
       const meta = {
@@ -1126,6 +1225,9 @@ function wireDataChannel(channel, peerId) {
       channel.send(JSON.stringify(meta));
       // Share initial HAVE bitmap
       sendHaveBitmap(channel);
+    } else if (pbRecv && channel.readyState === "open") {
+      // If we are a viewer with chunks already, share our HAVE bitmap
+      sendHaveBitmap(channel);
     }
   };
   channel.onclose = () => {
@@ -1134,6 +1236,8 @@ function wireDataChannel(channel, peerId) {
     graph.removeLink(myId, peerId);
     // Broadcast disconnection to all other peers
     broadcastGraphConnection(myId, peerId, false);
+    // Clean up per-peer tracking
+    inflightByPeer.delete(peerId);
   };
   channel.onerror = (e) =>
     appendLog(
@@ -1164,7 +1268,6 @@ function handleDCText(text, channel, peerId) {
       recvNumChunks = msg.numChunks | 0;
       recvChunkSize = msg.chunkSize | 0;
       const total = msg.totalSize | 0;
-      inflight = 0;
       nextToRequest = 0;
       pbRecv = new PeerBuffer(recvNumChunks, recvChunkSize);
       pbActive = pbRecv;
@@ -1186,11 +1289,17 @@ function handleDCText(text, channel, peerId) {
       }
       initMediaSource();
       startAppendLoop();
+      // Start periodic announce to keep swarm fresh
+      startPeriodicAnnounce();
+      // Announce immediately with our initial state
+      announceNow();
+      // Start timeout checker for stuck requests
+      startRequestTimeoutChecker();
       // Kick off requests
       appendLog("ℹ", `Starting chunk requests...`);
       scheduleRequests();
-      // After knowing numChunks, share our HAVE bitmap
-      sendHaveBitmap(channel);
+      // After knowing numChunks, share our HAVE bitmap with all peers
+      broadcastHaveBitmap();
     } else if (msg.t === "REQUEST") {
       // Host path: send requested chunk back
       const idx = msg.index | 0;
@@ -1259,12 +1368,21 @@ function handleDCBinary(bytes, channel, peerId) {
     payload = padded;
   }
   pbRecv.setChunk(index, payload);
-  inflight = Math.max(0, inflight - 1);
+  
+  // Decrement per-peer inflight counter
+  const currentInflight = inflightByPeer.get(peerId) || 0;
+  inflightByPeer.set(peerId, Math.max(0, currentInflight - 1));
+  
+  // Remove from globally requested chunks, timestamp, and peer map since we received it
+  requestedChunks.delete(index);
+  requestTimestamps.delete(index);
+  requestPeerMap.delete(index);
+  
   if (index % 50 === 0) {
     // Log every 50th chunk to avoid spam
     appendLog(
       "ℹ",
-      `Received chunk ${index}/${pbRecv.numChunks} (${pbRecv.haveCount} total)`
+      `Received chunk ${index}/${pbRecv.numChunks} from ${peerId} (${pbRecv.haveCount} total)`
     );
   }
   scheduleRequests();
@@ -1332,13 +1450,28 @@ function sendRequest(peerId, chunkIndex) {
     );
     return false;
   }
+  
+  // Check if we've already requested this chunk
+  if (requestedChunks.has(chunkIndex)) {
+    return false;
+  }
+  
+  // Check per-peer inflight limit
+  const currentInflight = inflightByPeer.get(peerId) || 0;
+  if (currentInflight >= inflightMax) {
+    return false;
+  }
+  
   const msg = {t: "REQUEST", index: chunkIndex};
   try {
     ch.send(JSON.stringify(msg));
-    inflight++;
+    inflightByPeer.set(peerId, currentInflight + 1);
+    requestedChunks.add(chunkIndex);
+    requestTimestamps.set(chunkIndex, Date.now());
+    requestPeerMap.set(chunkIndex, peerId);
     if (chunkIndex === 0 || chunkIndex % 100 === 0) {
       // Log first and every 100th
-      appendLog("ℹ", `Requesting chunk ${chunkIndex} from ${peerId}`);
+      appendLog("ℹ", `Requesting chunk ${chunkIndex} from ${peerId} (inflight: ${currentInflight + 1})`);
     }
     return true;
   } catch (e) {
@@ -1433,10 +1566,10 @@ function scheduleRequests() {
   // Sort by priority (highest first)
   candidates.sort((a, b) => b.priority - a.priority);
 
-  // Issue requests up to inflightMax using round-robin peer selection
+  // Issue requests using round-robin peer selection
+  // Each peer has its own inflight limit, so we can request from multiple peers simultaneously
   let issued = 0;
   for (const cand of candidates) {
-    if (inflight >= inflightMax) break;
     const idx = cand.index;
 
     // Use round-robin to select peer for this chunk
@@ -1444,6 +1577,12 @@ function scheduleRequests() {
 
     if (selectedPeer && sendRequest(selectedPeer.pid, idx)) {
       issued++;
+    }
+    
+    // Stop if we've issued enough requests (total across all peers)
+    const totalInflight = Array.from(inflightByPeer.values()).reduce((sum, val) => sum + val, 0);
+    if (totalInflight >= inflightMax * availablePeers.length) {
+      break;
     }
   }
 
