@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Optional, Set, Dict, Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
 
@@ -27,6 +32,30 @@ app.add_middleware(NoCacheMiddleware)
 @app.get("/health")
 def root():
     return {"status": "ok"}
+
+@app.get("/api/ice-servers")
+def get_ice_servers():
+    """Return ICE servers configuration including TURN servers from Metered.ca"""
+    metered_domain = os.getenv("METERED_DOMAIN")
+    metered_secret = os.getenv("METERED_SECRET_KEY")
+    
+    ice_servers = [
+        {"urls": "stun:stun.l.google.com:19302"}
+    ]
+    
+    # Add TURN servers if Metered credentials are configured
+    if metered_domain and metered_secret:
+        ice_servers.append({
+            "urls": [
+                f"turn:{metered_domain}:80?transport=tcp",
+                f"turn:{metered_domain}:443?transport=tcp",
+                f"turns:{metered_domain}:443?transport=tcp"
+            ],
+            "username": metered_domain,
+            "credential": metered_secret
+        })
+    
+    return {"iceServers": ice_servers}
 
 @app.get("/api/room/{room_name}/host")
 def check_host(room_name: str):
