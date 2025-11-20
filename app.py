@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Optional, Set, Dict, Any
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI(title="Jam Phase 1 - Single Room WS Only")
 
@@ -27,6 +33,49 @@ app.add_middleware(NoCacheMiddleware)
 @app.get("/health")
 def root():
     return {"status": "ok"}
+
+@app.get("/api/ice-servers")
+async def get_ice_servers():
+    """Fetch ICE servers from Metered.ca API - includes TURN servers for restrictive networks"""
+    metered_domain = os.getenv("METERED_DOMAIN")
+    metered_api_key = os.getenv("METERED_API_KEY")
+    
+    # Try to fetch from Metered.ca API
+    if metered_domain and metered_api_key:
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"https://{metered_domain}/api/v1/turn/credentials?apiKey={metered_api_key}"
+                response = await client.get(url, timeout=5.0)
+                
+                if response.status_code == 200:
+                    ice_servers = response.json()
+                    
+                    # Filter to ONLY TURNS on port 443 for university/restrictive networks
+                    # This is the only protocol that reliably works through firewalls
+                    filtered_servers = []
+                    for server in ice_servers:
+                        urls = server.get('urls', server.get('url', ''))
+                        # Keep only TURNS (with 's' = TLS) on port 443
+                        if isinstance(urls, str):
+                            if urls.startswith('turns:') and ':443' in urls:
+                                filtered_servers.append(server)
+                        elif isinstance(urls, list):
+                            for url in urls:
+                                if url.startswith('turns:') and ':443' in url:
+                                    filtered_servers.append({'urls': url, **{k: v for k, v in server.items() if k != 'urls'}})
+                    
+                    if filtered_servers:
+                        return {"iceServers": filtered_servers}
+                    else:
+                        print(f"Warning: No TURNS-443 servers found, using all servers")
+                        return {"iceServers": ice_servers}
+                else:
+                    print(f"Metered API error: {response.status_code}")
+        except Exception as e:
+            print(f"Failed to fetch Metered credentials: {e}")
+    
+    # Fallback to STUN only
+    return {"iceServers": [{"urls": "stun:stun.l.google.com:19302"}]}
 
 @app.get("/api/room/{room_name}/host")
 def check_host(room_name: str):

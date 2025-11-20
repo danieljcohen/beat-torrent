@@ -144,6 +144,24 @@ function setConnected(connected) {
 
 let myDisplayName = "User";
 
+// Fetch ICE servers from backend (includes TURN servers)
+async function fetchIceServers() {
+  try {
+    const response = await fetch("/api/ice-servers");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    if (data && data.iceServers) {
+      rtcConfig = {iceServers: data.iceServers};
+      appendLog("ℹ", `Loaded ICE servers: ${data.iceServers.length} server(s)`);
+    }
+  } catch (e) {
+    appendLog("!", `Failed to load ICE servers: ${e.message}, using STUN only`);
+    // Keep default STUN-only config as fallback
+  }
+}
+
 connectBtn.onclick = () => {
   const url = $("wsUrl").value.trim();
   const role = [...document.querySelectorAll('input[name="role"]')].find(
@@ -156,11 +174,13 @@ connectBtn.onclick = () => {
   appendLog("→", `Connecting to ${url} ...`);
   ws = new WebSocket(url);
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     setConnected(true);
     const hello = {type: "HELLO", role, display_name: displayName};
     ws.send(JSON.stringify(hello));
     appendLog("→", hello);
+    // Fetch ICE servers (including TURN) from backend
+    await fetchIceServers();
     // Auto-announce on connect
     announceNow();
   };
@@ -960,7 +980,7 @@ if (fileInput) {
 }
 
 // WebRTC DataChannel P2P for chunk transfer
-const rtcConfig = {iceServers: [{urls: ["stun:stun.l.google.com:19302"]}]};
+let rtcConfig = {iceServers: [{urls: ["stun:stun.l.google.com:19302"]}]};
 // Per-peer connections/channels
 const pcByPeer = new Map();
 const dcByPeer = new Map();
