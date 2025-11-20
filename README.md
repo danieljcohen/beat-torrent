@@ -13,20 +13,16 @@ BeatTorrent is a distributed, peer-to-peer music streaming system, following the
 * Peer discovery + swarm updates
 * WebRTC P2P chunk exchange
 * Distributed playback using MSE
+* Periodic viewer synchronization to host
+* TURN server as a fallback to STUN/NAT
+
+## Future Work
+* Functionality to multiple rooms
+* More viewer interacitivty with room (view song, vote on next, etc)
+* Compatibility across web browsers/devices
+* Visualization of chunk spread
+* Polish UI
+* Modularize codebase
 
 ## Notes
-One hardcoded room (jam1) where a host can send PLAY/PAUSE and everyone sees it (No HTTP, no files, no P2P)
-Host sends messages to server --> server broadcasts
-
 Local use: activate venv, uvicorn app:app --reload --port 8000, open static/index.html
-
-Get IP address: ipconfig getifaddr en0
-
-Terminal 1
-python peer.py \
-  --listen-port 9003 --seed --num-chunks 120 --chunk-size 4096
-
-Terminal 2
-python peer.py \
-  --listen-port 9004 --num-chunks 120 --chunk-size 4096 \
-  --connect [IP_ADDRESS]:9003 (use ur own IP)
