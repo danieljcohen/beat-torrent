@@ -209,8 +209,7 @@ async def ws_jam1(websocket: WebSocket):
             msg_raw = await websocket.receive_text()
             try:
                 msg = json.loads(msg_raw)
-            except Exception as e:
-                await websocket.send_text(json.dumps({"type": "ERROR", "message": f"Invalid JSON: {e}"}))
+            except Exception:
                 continue
 
             msg_type = msg.get("type")
@@ -218,9 +217,7 @@ async def ws_jam1(websocket: WebSocket):
             if msg_type in ("PLAY", "PAUSE"):
                 # Only host can control
                 if not is_host or id(websocket) != host_id:
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "Only host can control"}))
                     continue
-
                 # Update state
                 state["track_id"] = msg["track_id"]
                 state["status"] = msg_type
@@ -248,16 +245,10 @@ async def ws_jam1(websocket: WebSocket):
                 ip = getattr(websocket.client, "host", None) or "0.0.0.0"
                 now = time.time()
                 room = msg.get("room")
-                if not room:
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "ANNOUNCE missing room"}))
-                    continue
                 port = msg.get("port")
                 total_chunks = msg.get("total_chunks")
                 chunk_size = msg.get("chunk_size")
                 have_count = int(msg.get("have_count") or 0)
-                if not isinstance(port, int):
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "ANNOUNCE missing/invalid port"}))
-                    continue
                 swarm = swarms.setdefault(room, {})
                 entry = swarm.get(caller_id) or {}
                 entry["ip"] = ip
@@ -296,9 +287,6 @@ async def ws_jam1(websocket: WebSocket):
                 now = time.time()
                 room = msg.get("room")
                 indices = msg.get("indices") or []
-                if not room:
-                    await websocket.send_text(json.dumps({"type": "ERROR", "message": "HAVE_DELTA missing room"}))
-                    continue
                 swarm = swarms.setdefault(room, {})
                 entry = swarm.get(caller_id) or {"ip": getattr(websocket.client, "host", None) or "0.0.0.0", "port": None}
                 entry["last_seen"] = now
@@ -328,8 +316,6 @@ async def ws_jam1(websocket: WebSocket):
                 await websocket.send_text(json.dumps(resp))
                 # Broadcast updated peers to everyone in the room
                 await push_peers_to_room(room)
-            else:
-                await websocket.send_text(json.dumps({"type": "ERROR", "message": f"Unknown type: {msg_type}"}))
                 
     except WebSocketDisconnect:
         pass
