@@ -25,4 +25,4 @@ BeatTorrent is a distributed, peer-to-peer music streaming system, following the
 * Modularize codebase
 
 ## Notes
-Local use: activate venv, uvicorn app:app --reload --port 8000, open static/index.html
+Local use: activate venv, uvicorn app:app --reload --port 8000, open frontend/index.html
