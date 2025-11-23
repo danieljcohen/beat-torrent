@@ -140,30 +140,50 @@
 
       <div class="card">
         <label>Browser Player</label>
-        
+
         <!-- Host-only controls -->
-        <div id="hostControls" style="display: none;">
+        <div id="hostControls" style="display: none">
           <div class="row" style="margin-top: 8px">
             <input id="fileInput" type="file" accept="audio/mpeg,audio/mp3" />
-            <div style="margin-left: auto; display: flex; gap: 8px;">
+            <div style="margin-left: auto; display: flex; gap: 8px">
               <button id="playBtn" disabled>▶ Play</button>
               <button id="pauseBtn" class="secondary" disabled>⏸ Pause</button>
             </div>
           </div>
         </div>
-        
+
         <!-- Playback progress (for everyone) -->
-        <div style="margin-top: 12px;">
-          <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+        <div style="margin-top: 12px">
+          <div
+            style="
+              display: flex;
+              justify-content: space-between;
+              margin-bottom: 4px;
+            ">
             <span class="muted" id="trackName">No track loaded</span>
             <span class="muted" id="currentTime">0:00 / 0:00</span>
           </div>
-          <div style="width: 100%; height: 6px; background: #0f162b; border-radius: 3px; overflow: hidden; border: 1px solid #243056;">
-            <div id="progressBar" style="width: 0%; height: 100%; background: #5b78ff; transition: width 0.3s;"></div>
+          <div
+            style="
+              width: 100%;
+              height: 6px;
+              background: #0f162b;
+              border-radius: 3px;
+              overflow: hidden;
+              border: 1px solid #243056;
+            ">
+            <div
+              id="progressBar"
+              style="
+                width: 0%;
+                height: 100%;
+                background: #5b78ff;
+                transition: width 0.3s;
+              "></div>
           </div>
         </div>
-        
-        <div class="row" style="margin-top: 8px; display: none;">
+
+        <div class="row" style="margin-top: 8px; display: none">
           <audio id="audioEl"></audio>
         </div>
         <div class="row" style="margin-top: 8px">
@@ -173,7 +193,6 @@
           >
         </div>
       </div>
-
 
       <div class="card">
         <label>P2P Graph</label>
@@ -205,11 +224,20 @@
       </div>
 
       <div class="card">
-        <div style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;" id="consoleToggle">
-          <label style="cursor: pointer;">Console</label>
-          <span id="consoleArrow" style="font-size: 14px; color: #a9b4d0;">▼</span>
+        <div
+          style="
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+          "
+          id="consoleToggle">
+          <label style="cursor: pointer">Console</label>
+          <span id="consoleArrow" style="font-size: 14px; color: #a9b4d0"
+            >▼</span
+          >
         </div>
-        <div id="consoleContent" style="display: none; margin-top: 10px;">
+        <div id="consoleContent" style="display: none; margin-top: 10px">
           <div id="log" class="log"></div>
         </div>
       </div>
@@ -217,6 +245,6 @@
 
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="./p2p-graph.js"></script>
-    <script src="./frontend.js"></script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>

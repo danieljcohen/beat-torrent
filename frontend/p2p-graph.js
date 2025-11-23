@@ -51,9 +51,7 @@
     .attr("stroke", "#fff")
     .attr("stroke-width", 1.5)
     .selectAll("circle");
-  let textEl = svg
-    .append("g")
-    .selectAll("text");
+  let textEl = svg.append("g").selectAll("text");
 
   function updateGraph() {
     const nodes = Array.from(state.nodes.values());
@@ -102,7 +100,7 @@
         .attr("y2", (d) => d.target.y);
 
       nodeEl.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
-      
+
       textEl.attr("x", (d) => d.x).attr("y", (d) => d.y);
     });
 
